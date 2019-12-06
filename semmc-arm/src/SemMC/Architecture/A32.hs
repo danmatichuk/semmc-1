@@ -49,11 +49,11 @@ import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits
 import qualified GHC.Err.Located as L
 import qualified SemMC.Architecture as A
+import qualified SemMC.Architecture.Location as AL
 import           SemMC.Architecture.ARM.BaseSemantics.Registers ( numGPR, GPRIdent )
 import qualified SemMC.Architecture.ARM.Components as ARMComp
 import           SemMC.Architecture.ARM.Eval
 import qualified SemMC.Architecture.ARM.UF as UF
-import           SemMC.Architecture.ARM.Location ( ArchRegWidth )
 import           SemMC.Architecture.A32.Location
 import qualified SemMC.Architecture.ARM.OperandComponents as AOC
 import qualified SemMC.Architecture.Concrete as AC
@@ -193,7 +193,7 @@ replaceLiterals (AC.LiteralRef ix) loc (ops, s) =
 truncateValue :: ARMDis.Operand s
               -> V.Value (A.OperandType A32 s)
               -> (V.Value (A.OperandType A32 s), ARMDis.Operand s)
-truncateValue op v =
+truncateValue op _v =
   case op of
     _ -> L.error "truncateValue for A32 not yet implemented"
 
@@ -384,6 +384,9 @@ instance A.IsLocation (Location A32) where
   isMemoryLocation LocMem2 = True
   isMemoryLocation _ = False
 
+  isIP LocPC = True
+  isIP _     = False
+
   readLocation = P.parseMaybe parseLocation
 
   locationType (LocGPR _) = knownRepr
@@ -404,15 +407,15 @@ instance A.IsLocation (Location A32) where
   defaultLocationExpr sym LocMem2 =
       S.constantArray sym knownRepr =<< S.bvLit sym knownNat 0
 
-  allLocations = concat
+  nonMemLocations = concat
     [ map (Some . LocGPR) [0..numGPR-1]
     , map (Some . LocGPRMask) [0..numGPR-1]
     , [ Some LocPC
       , Some LocCPSR
-      , Some LocMem1
-      , Some LocMem2
       ]
     ]
+
+  memLocation = [AL.toMemLoc  LocMem1, AL.toMemLoc LocMem2]
 
   registerizationLocations = []
 
@@ -443,7 +446,7 @@ parsePrefixedRegister f prefix = do
 
 -- ----------------------------------------------------------------------
 
-type instance ArchRegWidth A32 = 32
+type instance A.RegWidth A32 = 32
 
 instance A.Architecture A32 where
     data TaggedExpr A32 sym s = TaggedExpr (A.AllocatedOperand A32 sym s)
@@ -456,8 +459,13 @@ instance A.Architecture A32 where
     allocateSymExprsForOperand _ = operandValue
     operandToLocation _ = operandToLocation
     uninterpretedFunctions = UF.uninterpretedFunctions
+    readMemUF = A.uninterpFnName . UF.mkReadMemUF @A32
+    writeMemUF = A.uninterpFnName . UF.mkWriteMemUF @A32
     locationFuncInterpretation _proxy = A.createSymbolicEntries locationFuncInterpretation
     shapeReprToTypeRepr _proxy = shapeReprType
+    operandComponentsImmediate = AOC.operandComponentsImmediate
+    -- FIXME: architecture endianness is configurable, not sure how to represent this
+    archEndianForm _ = A.LittleEndian
 
 -- | Deconstruct an argument list for the 'a32.is_r15' pseudo-operation and
 -- interpret the arguments.

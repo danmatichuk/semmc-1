@@ -7,12 +7,10 @@
 
 module SemMC.Architecture.PPC.Location (
   Location(..),
-  ArchRegWidth,
+--  ArchRegWidth,
   ArchRepr(..)
 --  parseLocation
   ) where
-
-import GHC.TypeLits
 
 import qualified Data.Parameterized.Ctx as Ctx
 import           Data.Parameterized.Classes
@@ -23,27 +21,26 @@ import           Text.PrettyPrint.HughesPJClass ( pPrint )
 import           What4.BaseTypes
 
 import qualified Dismantle.PPC as PPC
-
-type family ArchRegWidth arch :: Nat
+import qualified SemMC.Architecture as A
 
 class ArchRepr arch where
-  regWidthRepr :: proxy arch -> NatRepr (ArchRegWidth arch)
+  regWidthRepr :: proxy arch -> NatRepr (A.RegWidth arch)
 
 data Location ppc :: BaseType -> * where
   -- NOTE: If you add new constructors here, you also need to update:
   --   * the PPC state serializer / deserializer functions
   --   * the remote-runner.c program's PPC32 state struct definition
-  LocGPR :: PPC.GPR -> Location ppc (BaseBVType (ArchRegWidth ppc))
-  LocIP :: Location ppc (BaseBVType (ArchRegWidth ppc))
+  LocGPR :: PPC.GPR -> Location ppc (BaseBVType (A.RegWidth ppc))
+  LocIP :: Location ppc (BaseBVType (A.RegWidth ppc))
   LocMSR :: Location ppc (BaseBVType 32)
-  LocCTR :: Location ppc (BaseBVType (ArchRegWidth ppc))
-  LocLNK :: Location ppc (BaseBVType (ArchRegWidth ppc))
-  LocXER :: Location ppc (BaseBVType (ArchRegWidth ppc))
+  LocCTR :: Location ppc (BaseBVType (A.RegWidth ppc))
+  LocLNK :: Location ppc (BaseBVType (A.RegWidth ppc))
+  LocXER :: Location ppc (BaseBVType (A.RegWidth ppc))
   LocCR :: Location ppc (BaseBVType 32)
   LocVSR :: PPC.VSReg -> Location ppc (BaseBVType 128)
   LocFPSCR :: Location ppc (BaseBVType 32)
   LocVSCR :: Location ppc (BaseBVType 32)
-  LocMem :: Location ppc (BaseArrayType (Ctx.SingleCtx (BaseBVType (ArchRegWidth ppc))) (BaseBVType 8))
+  LocMem :: Location ppc (BaseArrayType (Ctx.SingleCtx (BaseBVType (A.RegWidth ppc))) (BaseBVType 8))
 
 instance Show (Location ppc tp) where
   show (LocGPR gpr) = show (pPrint gpr)

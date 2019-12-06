@@ -68,8 +68,11 @@ import qualified Lang.Crucible.CFG.SSAConversion as CCS
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.Types as CT
 import qualified What4.BaseTypes as WT
+import qualified What4.Utils.StringLiteral as WT
+
 import qualified What4.FunctionName as WFN
 import qualified What4.ProgramLoc as WP
+
 
 import qualified Language.ASL.Syntax as AS
 
@@ -234,7 +237,7 @@ defineFunction ov sig baseGlobals stmts _args = do
     Ctx.Empty -> unliftGenerator $ translateStatement ov (AS.StmtReturn Nothing)
     _ -> return ()
   let errmsg = "Function " <> funcName sig <> " does not return."
-  errStr <- CCG.mkAtom (CCG.App (CCE.TextLit errmsg))
+  errStr <- CCG.mkAtom (CCG.App (CCE.StringLit $ WT.UnicodeLiteral errmsg))
   CCG.reportError (CCG.AtomExpr errStr)
 
 {- Note [Call Translation]

@@ -155,9 +155,10 @@ doThing2 = do
   -- target <- fooFormula sym
   target <- independentFormula sym
 
-  let env = setupEnvironment sym (toBaseSet baseset)
-  print =<< mcSynth env target
+  let synthEnv = setupEnvironment sym (toBaseSet baseset)
+  print =<< mcSynth synthEnv target
   print $ extractUsedLocs (formParamVars target) (fromJust $ MapF.lookup (RegLoc Reg2) $ formDefs target)
+
 
 doThing3 :: (U.HasLogCfg) => IO ()
 doThing3 = do
@@ -180,8 +181,8 @@ doThing4 = do
               $ MapF.empty
 
   ind <- independentFormula sym
-  let env = setupEnvironment sym (toBaseSet baseset)
-  print =<< mcSynth env ind
+  let synthEnv = setupEnvironment sym (toBaseSet baseset)
+  print =<< mcSynth synthEnv ind
 
 ----------------------------------------------------------------
 -- * Stratefied synthesis

@@ -12,12 +12,13 @@ packages:
   submodules/dismantle/dismantle-arm-xml/
   submodules/dismantle/dismantle-thumb/
   submodules/dismantle/dismantle-ppc/
-  submodules/s-cargot
   submodules/arm-asl-parser/
 
 optional-packages:
   submodules/crucible/crucible
   submodules/crucible/what4
+  submodules/crucible/crucible-llvm
+  submodules/llvm-pretty
   submodules/parameterized-utils
   submodules/elf-edit/
   submodules/dismantle/dismantle-ppc/

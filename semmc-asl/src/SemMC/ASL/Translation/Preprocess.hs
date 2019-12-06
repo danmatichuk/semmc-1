@@ -490,7 +490,7 @@ initializeSigM ASLSpec{..} = do
       Some (UserStruct ut) <- computeUserType typnm
       fieldMap <- Ctx.traverseAndCollect (collectGlobalFields nm) ut
       let ext = TypeGlobalStruct fieldMap
-      RWS.modify' $ \st -> st { globalVars = f nm (Some WT.BaseStringRepr) (globalVars st),
+      RWS.modify' $ \st -> st { globalVars = f nm (Some (WT.BaseStructRepr Ctx.empty)) (globalVars st),
                      extendedTypeData = f nm ext (extendedTypeData st) }
 
     initDefGlobal f (AS.DefVariable (AS.QualifiedIdentifier _ nm) ty) = do
@@ -553,7 +553,7 @@ type GlobalVarRefs = (Set.Set (T.Text, Some WT.BaseTypeRepr), Set.Set (T.Text, S
 unpackGVarRefs :: GlobalVarRefs -> ([(T.Text, Some WT.BaseTypeRepr)], [(T.Text, Some WT.BaseTypeRepr)])
 unpackGVarRefs (reads, writes) =
   let
-    globalStructs = Set.fromList $ map (\nm -> (nm, Some WT.BaseStringRepr)) globalStructNames
+    globalStructs = Set.fromList $ map (\nm -> (nm, Some (WT.BaseStructRepr Ctx.empty))) globalStructNames
     globalReads = Set.unions [reads, writes, builtinReads, builtinWrites] Set.\\ globalStructs
     globalWrites = Set.unions [writes, builtinWrites] Set.\\ globalStructs
   in (Set.toList globalReads, Set.toList globalWrites)

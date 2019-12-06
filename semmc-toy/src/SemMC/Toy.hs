@@ -285,6 +285,8 @@ instance A.IsOperandTypeRepr Toy where
   type OperandTypeRepr Toy = SR.SymbolRepr
   operandTypeReprSymbol _ = T.unpack . SR.symbolRepr
 
+type instance A.RegWidth Toy = 16
+
 instance TemplatableOperand Toy where
   opTemplates sr =
     case SR.symbolRepr sr of
@@ -347,6 +349,9 @@ instance A.Architecture Toy where
   taggedOperand = unTaggedExpr
 
   uninterpretedFunctions _ = []
+  readMemUF _ = undefined
+  writeMemUF _ = undefined
+  archEndianForm _ = undefined
 
   allocateSymExprsForOperand _ _ newVars (R32 reg) =
     let loc = RegLoc reg
@@ -359,6 +364,8 @@ instance A.Architecture Toy where
   locationFuncInterpretation _ = []
 
   shapeReprToTypeRepr _proxy = shapeReprType
+
+  operandComponentsImmediate _ _ = Nothing
 
 ----------------------------------------------------------------
 -- ** Locations
@@ -391,10 +398,12 @@ instance A.IsLocation Location where
 
   defaultLocationExpr sym RegLoc{} = S.bvLit sym (knownNat :: NatRepr 32) 0
 
-  allLocations = map (Some . RegLoc) [Reg1, Reg2, Reg3]
   registerizationLocations = A.allLocations
 
   isMemoryLocation _ = False
+  isIP _ = False
+  nonMemLocations = map (Some . RegLoc) [Reg1, Reg2, Reg3]
+  memLocation = []
 
 interestingStates :: [MachineState]
 interestingStates =

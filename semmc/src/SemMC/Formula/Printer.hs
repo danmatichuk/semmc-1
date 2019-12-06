@@ -551,7 +551,7 @@ convertBaseType tp = case tp of
   S.BaseNatRepr -> SE.A (AQuoted "nat")
   S.BaseIntegerRepr -> SE.A (AQuoted "int")
   S.BaseRealRepr -> SE.A (AQuoted "real")
-  S.BaseStringRepr -> SE.A (AQuoted "string")
+  S.BaseStringRepr _ -> SE.A (AQuoted "string") -- parser assumes unicode
   S.BaseComplexRepr -> SE.A (AQuoted "complex")
   S.BaseBVRepr wRepr -> SE.L [SE.A (AQuoted "bv"), SE.A (AInt (NR.intValue wRepr)) ]
   S.BaseStructRepr tps -> SE.L [SE.A (AQuoted "struct"), convertBaseTypes tps]

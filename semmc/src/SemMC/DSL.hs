@@ -1295,7 +1295,7 @@ exprTypeToBaseType repr =
   case repr of
     EBool -> Some CRU.BaseBoolRepr
     EInt -> Some CRU.BaseIntegerRepr
-    EBV n | Just (Some n') <- NR.someNat ((fromIntegral n) :: Integer)
+    EBV n | Just (Some n') <- NR.someNat @Integer (fromIntegral n)
           , Just NR.LeqProof <- NR.isPosNat n'
           -> Some (CRU.BaseBVRepr n')
     EFloat -> Some $
@@ -1320,7 +1320,7 @@ convertBaseType repr =
       , int (fromIntegral (CRU.natValue eb))
       , int (fromIntegral (CRU.natValue sb))
       ]
-    CRU.BaseStringRepr -> quoted "string"
+    CRU.BaseStringRepr _ -> quoted "string"
     CRU.BaseComplexRepr -> quoted "complex"
     CRU.BaseStructRepr reprs ->
       fromFoldable' [ quoted "struct", fromFoldable' (toListFC convertBaseType reprs) ]

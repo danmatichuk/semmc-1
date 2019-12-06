@@ -33,6 +33,7 @@ import           Control.Monad ( when )
 import           Data.Foldable ( foldrM )
 import           Data.Kind
 import qualified Data.Map as Map
+import qualified Data.SCargot as SC
 import qualified Data.SCargot.Repr as SC
 import           Data.Semigroup
 import qualified Data.Text as T
@@ -182,7 +183,7 @@ readBaseType sexpr =
         "nat" -> return $ Some BaseNatRepr
         "int" -> return $ Some BaseIntegerRepr
         "real" -> return $ Some BaseRealRepr
-        "string" -> return $ Some BaseStringRepr
+        "string" -> return $ Some (BaseStringRepr UnicodeRepr)
         "complex" -> return $ Some BaseComplexRepr
         _ -> panic
     SC.SCons (SC.SAtom (AQuoted "bv")) (SC.SCons (SC.SAtom (AInt w)) SC.SNil)
@@ -908,7 +909,6 @@ readLetExpr (SC.SCons (SC.SCons (SC.SAtom x@(AIdent _)) (SC.SCons e SC.SNil)) rs
 readLetExpr bindings _body = E.throwError $
   "invalid s-expression for let-bindings: " ++ (show bindings)
 
-
 -- | Parse an arbitrary expression.
 readExpr :: forall sym m arch sh
           . (S.IsSymExprBuilder sym,
@@ -1260,7 +1260,6 @@ readDefinedFunction' sym env text = do
   let symbol = U.makeSymbol name
       argVarAssignment = TL.toAssignmentFwd argVarList
       expand args = allFC S.baseIsConcrete args
-
   symFn <- liftIO $ S.definedFn sym symbol argVarAssignment body expand
   return $ Some (FunctionFormula { ffName = name
                                  , ffArgTypes = argTypeReprs

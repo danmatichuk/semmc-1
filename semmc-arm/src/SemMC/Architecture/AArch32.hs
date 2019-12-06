@@ -62,6 +62,7 @@ import qualified Dismantle.Thumb.Operands as ThumbOperands
 import           GHC.TypeLits
 import           Language.Haskell.TH hiding ( recover )
 import qualified SemMC.Architecture as A
+import qualified SemMC.Architecture.Location as AL
 import           SemMC.Architecture.ARM.BaseSemantics.Registers ( numGPR, regWidth )
 import           SemMC.Architecture.ARM.Combined
 import qualified SemMC.Architecture.ARM.Components as ARMComp
@@ -240,7 +241,7 @@ operandValue sym locLookup op = TaggedExpr <$> opV op
         opVa (ARMDis.So_reg_imm v) = A.ValueOperand <$> S.bvLit sym knownNat (toInteger (ARMOperands.soRegImmToBits v))
         opVa (ARMDis.So_reg_reg v) = A.ValueOperand <$> S.bvLit sym knownNat (toInteger (ARMOperands.soRegRegToBits v))
         opVa (ARMDis.Unpredictable v) = A.ValueOperand <$> S.bvLit sym knownNat (toInteger v)
-        -- opV unhandled = error $ "operandValue not implemented for " <> show unhandled
+        opVa unhandled = error $ "operandValue not implemented for " <> show unhandled
 
         opVt :: ThumbDis.Operand s -> IO (A.AllocatedOperand AArch32 sym s)
         opVt (ThumbDis.Cc_out v) = A.ValueOperand <$> S.bvLit sym knownNat (toInteger (ARMOperands.sBitToBits v))
@@ -283,11 +284,14 @@ operandToLocation _ = Nothing
 
 -- ----------------------------------------------------------------------
 
-instance (KnownNat (ArchRegWidth arm), 1 <= ArchRegWidth arm) =>
+instance (KnownNat (A.RegWidth arm), 1 <= A.RegWidth arm) =>
          A.IsLocation (Location arm) where
 
   isMemoryLocation LocMem = True
   isMemoryLocation _ = False
+
+  isIP LocPC = True
+  isIP _     = False
 
   readLocation = P.parseMaybe parseLocation
 
@@ -302,13 +306,13 @@ instance (KnownNat (ArchRegWidth arm), 1 <= ArchRegWidth arm) =>
   defaultLocationExpr sym LocMem =
       S.constantArray sym knownRepr =<< S.bvLit sym knownNat 0
 
-  allLocations = concat
+  nonMemLocations = concat
     [ map (Some . LocGPR) [0..numGPR-1],
       [ Some LocPC
       , Some LocCPSR
-      , Some LocMem
       ]
     ]
+  memLocation = [AL.toMemLoc LocMem]
 
   registerizationLocations = [] -- map (Some . LocGPR . ARMDis.GPR) (0 : [3..4])
 
@@ -340,7 +344,7 @@ parsePrefixedRegister f c = do
 --             OrdF (A.Opcode ARM (A.Operand ARM))
 --                  (Data.EnumF.EnumF (A.Opcode ARM (A.Operand ARM)))
 
-type instance ArchRegWidth AArch32 = $(litT $ numTyLit regWidth)
+type instance A.RegWidth AArch32 = $(litT $ numTyLit regWidth)
 
 
 instance A.Architecture AArch32 where
@@ -354,8 +358,13 @@ instance A.Architecture AArch32 where
     allocateSymExprsForOperand _ = operandValue
     operandToLocation _ = operandToLocation
     uninterpretedFunctions = UF.uninterpretedFunctions
+    readMemUF = A.uninterpFnName . UF.mkReadMemUF @AArch32
+    writeMemUF = A.uninterpFnName . UF.mkWriteMemUF @AArch32
     locationFuncInterpretation _proxy = A.createSymbolicEntries locationFuncInterpretation
     shapeReprToTypeRepr _proxy = shapeReprType
+    operandComponentsImmediate = AOC.operandComponentsImmediate
+    -- FIXME: architecture endianness is configurable, not sure how to represent this
+    archEndianForm _ = A.LittleEndian
 
 noLocation :: PL.List (A.AllocatedOperand arch sym) sh
            -> F.WrappedOperand arch sh s

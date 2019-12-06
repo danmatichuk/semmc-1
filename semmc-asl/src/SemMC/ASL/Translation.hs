@@ -73,7 +73,7 @@ import qualified What4.BaseTypes as WT
 import qualified What4.FunctionName as WF
 import qualified What4.ProgramLoc as WP
 import qualified What4.Symbol as WS
-
+import qualified What4.Utils.StringLiteral as WT
 
 import qualified Language.ASL.Syntax as AS
 
@@ -394,8 +394,8 @@ assertAtom ov test mexpr msg = do
   case mexpr of
     Just (AS.ExprVarRef (AS.QualifiedIdentifier _ "FALSE")) -> return ()
     Just expr ->
-      liftGenerator $ CCG.assertExpr (CCG.AtomExpr test) (CCG.App (CCE.TextLit $ msg <> (T.pack $ "Expression: " <> show expr)))
-    _ -> liftGenerator $ CCG.assertExpr (CCG.AtomExpr test) (CCG.App (CCE.TextLit msg))
+      liftGenerator $ CCG.assertExpr (CCG.AtomExpr test) (CCG.App (CCE.StringLit $ WT.UnicodeLiteral $ msg <> (T.pack $ "Expression: " <> show expr)))
+    _ -> liftGenerator $ CCG.assertExpr (CCG.AtomExpr test) (CCG.App (CCE.StringLit $ WT.UnicodeLiteral msg))
   Some assertTrippedE <- lookupVarRef assertionfailureVarName
   assertTripped <- mkAtom assertTrippedE
   Refl <- assertAtomType' CT.BoolRepr assertTripped

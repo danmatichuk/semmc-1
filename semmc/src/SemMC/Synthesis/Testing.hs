@@ -7,11 +7,11 @@ module SemMC.Synthesis.Testing (
   ) where
 
 import qualified Data.Foldable as F
-import           Data.Parameterized.Classes ( OrdF )
 import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Map as MapF
 import qualified What4.Protocol.Online as WPO
 import qualified Lang.Crucible.Backend.Online as CBO
+import qualified Lang.Crucible.Backend as CB
 
 import qualified SemMC.Architecture as A
 import qualified SemMC.Formula as SF
@@ -34,8 +34,8 @@ synthesizeAndCheck :: forall proxy arch t solver fs
                       , A.Architecture (SS.TemplatedArch arch)
                       , A.ArchRepr arch
                       , WPO.OnlineSolver t solver
-                      , OrdF (A.Opcode arch (SS.TemplatedOperand arch))
                       , SS.TemplatableOperand arch
+                      , CB.IsSymInterface (CBO.OnlineBackend t solver fs)
                       )
                    => proxy arch
                    -> SS.SynthesisEnvironment (CBO.OnlineBackend t solver fs) arch
@@ -44,18 +44,25 @@ synthesizeAndCheck :: forall proxy arch t solver fs
                    -> [A.Instruction arch]
                    -> IO SynthResult
 synthesizeAndCheck proxy env sem matchInsn p = do
+  print $ "Synthesizing program from "
+  putStrLn $ show p
   mfrm <- symbolicallySimulateProgram proxy (SS.synthSym env) sem matchInsn p
   case mfrm of
     Just frm -> do
+      print $ "Obtained formula from program"
+      putStrLn $ show frm
       mp <- SS.mcSynth env frm
       case mp of
         Nothing -> return FailedSynthesis
         Just p' -> do
+          print $ "Obtained synthesized program "
+          putStrLn $ show p'
           mfrm' <- symbolicallySimulateProgram proxy (SS.synthSym env) sem matchInsn p'
           case mfrm' of
             Nothing -> return MissingSemantics
             Just frm' -> do
-              er <- SF.formulasEquivConcrete (SS.synthSym env) frm frm'
+              print $ "Obtained formula from new program"
+              er <- SF.formulasEquivConcrete (SS.synthSym env) (SF.formStripIP frm) (SF.formStripIP frm')
               case er of
                 SF.Equivalent -> return Equivalent
                 SF.DifferentBehavior {} -> return BadSemantics
@@ -82,4 +89,5 @@ symbolicallySimulateProgram _ sym sem matchInsn p = do
     toSemantics i = matchInsn i $ \opc operands -> do
       case MapF.lookup opc sem of
         Nothing -> return Nothing
-        Just pf -> (Just . snd) <$> SF.instantiateFormula sym pf operands
+        Just pf -> do res <- (Just . snd) <$> SF.instantiateFormula sym pf operands
+                      return res

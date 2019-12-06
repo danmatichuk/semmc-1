@@ -4,6 +4,7 @@ module SemMC.Synthesis
   , SynthesisEnvironment
   , synthSym
   , mcSynth
+  , mcSynthTimeout
   , TemplatedArch
   , TemplatedOperand
   , BaseSet
@@ -13,8 +14,12 @@ module SemMC.Synthesis
   ) where
 
 import           Data.Typeable
+import           Control.Monad (join)
+import           System.Timeout (timeout)
+import           Control.Exception.Base (finally)
 
 import qualified What4.Protocol.Online as WPO
+import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 
 import           SemMC.Architecture
@@ -54,25 +59,54 @@ setupEnvironment sym baseSet =
                           , synthInsns = insns
                           }
 
-mcSynth :: (Architecture arch,
-            Architecture (TemplatedArch arch),
+-- | Synthesizes a list of instructions from a formula.
+--
+-- TODO: Restore divide and conquer passes that are currently commented out
+mcSynth :: (TemplateConstraints arch,
             ArchRepr arch,
-            TemplatableOperand arch,
-            Typeable arch,
-            WPO.OnlineSolver t solver
-            )
+            WPO.OnlineSolver t solver,
+            CB.IsSymInterface (CBO.OnlineBackend t solver fs)
+           )
         => SynthesisEnvironment (CBO.OnlineBackend t solver fs) arch
         -> Formula (CBO.OnlineBackend t solver fs) arch
         -> IO (Maybe [Instruction arch])
 mcSynth env target = do
+
+  -- Synthesize the target without considering the behavior of the instruction pointer
+  let target' = formStripIP target
+
+  putStrLn $ "Calling mcSynth on target " ++ show target'
   let params = SynthesisParams { synthEnv = env
                                , synthMaxLength = 0
                                }
-  ret1 <- divideAndConquer (params { synthMaxLength = 1 }) target
-  case ret1 of
-    Just _ -> return ret1
-    Nothing -> do
-      ret2 <- divideAndConquer (params { synthMaxLength = 2 }) target
-      case ret2 of
-        Just _ -> return ret2
-        Nothing -> synthesizeFormula (params { synthMaxLength = 1000 }) target
+  safeAssumptionFrame (synthSym env) $ do
+   --  synthesizeFormula (params {synthMaxLength = 1}) target'
+    ret1 <- divideAndConquer (params { synthMaxLength = 1 }) target'
+    case ret1 of
+      Just _ -> return ret1
+      Nothing -> do
+      -- Instead of repeating each call, perhaps we can only recurse if the result
+      -- ran out of space, which could be tracked in 'synthesizeFormula'
+        ret2 <- divideAndConquer (params { synthMaxLength = 2 }) target'
+        case ret2 of
+          Just _ -> return ret2
+          Nothing -> synthesizeFormula (params { synthMaxLength = 1000 }) target'
+  where
+    -- Isolate the solver environment using pushFrame and popFrame
+    safeAssumptionFrame sym op = do
+      frame <- CB.pushAssumptionFrame sym
+      finally op (CB.popAssumptionFrame sym frame)
+
+
+-- | Synthesizes a list of instructions from a formula, within a particular
+-- timeout limit.
+mcSynthTimeout :: (TemplateConstraints arch,
+                   ArchRepr arch,
+                   WPO.OnlineSolver t solver,
+                   CB.IsSymInterface (CBO.OnlineBackend t solver fs)
+                  )
+               => Int 
+               -> SynthesisEnvironment (CBO.OnlineBackend t solver fs) arch
+               -> Formula (CBO.OnlineBackend t solver fs) arch
+               -> IO (Maybe [Instruction arch])
+mcSynthTimeout t env f = join <$> (timeout t $ mcSynth env f)

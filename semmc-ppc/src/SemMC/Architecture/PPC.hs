@@ -55,8 +55,7 @@ addrWidth :: VariantRepr v -> NatRepr (AddrWidth v)
 addrWidth V32Repr = knownNat
 addrWidth V64Repr = knownNat
 
-type instance ArchRegWidth (AnyPPC v) = AddrWidth v
-
+type instance A.RegWidth (AnyPPC v) = AddrWidth v
 type instance A.Location (AnyPPC v) = Location (AnyPPC v)
 
 ----------------------------------------------------------------------

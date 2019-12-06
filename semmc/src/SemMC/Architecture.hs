@@ -15,6 +15,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module SemMC.Architecture (
   Architecture(..),
@@ -22,6 +25,7 @@ module SemMC.Architecture (
   OperandComponents,
   Location,
   IsLocation(..),
+  allLocations,
   Evaluator(..),
   FunctionInterpretation(..),
   Instruction,
@@ -32,9 +36,21 @@ module SemMC.Architecture (
   OperandType,
   IsOperandTypeRepr(..),
   ArchRepr,
+  RegWidth,
   ShapeRepr,
+  UninterpFn(..),
+  mkUninterpFn,
+  getUninterpFn,
+  AccessData(..),
+  LLVM.EndianForm(..),
+  MemType,
+  memTypeRepr,
+  accessAddr,
   showShapeRepr,
-  createSymbolicEntries
+  createSymbolicEntries,
+  createSymbolicName,
+  regWidth,
+  taggedExprImmediate
   ) where
 
 import           Data.EnumF
@@ -46,12 +62,14 @@ import qualified Data.Parameterized.List as SL
 import qualified Data.Parameterized.HasRepr as HR
 import           Data.Proxy ( Proxy(..) )
 import           Data.Typeable ( Typeable )
-import           GHC.TypeLits ( Symbol )
+import           GHC.TypeLits ( Symbol, Nat, KnownNat )
 import qualified Language.Haskell.TH as TH
 
 import           What4.BaseTypes
 import qualified What4.Interface as S
 import qualified What4.Expr as S
+
+import qualified Lang.Crucible.LLVM.DataLayout as LLVM
 
 import           SemMC.Architecture.AllocatedOperand
 import           SemMC.Architecture.Internal
@@ -77,7 +95,8 @@ class (IsOperand (Operand arch),
        ShowF (Operand arch),
        OrdF (Opcode arch (Operand arch)),
        ShowF (Opcode arch (Operand arch)),
-       EnumF (Opcode arch (Operand arch)))
+       EnumF (Opcode arch (Operand arch)),
+       HasRegWidth arch)
       => Architecture arch where
 
   -- | Tagged expression type for this architecture.
@@ -100,8 +119,16 @@ class (IsOperand (Operand arch),
   -- | Extract the 'AllocatedOperand' from a 'TaggedExpr'
   taggedOperand :: TaggedExpr arch sym s -> AllocatedOperand arch sym s
 
-  -- | The uninterpreted functions referred to by this architecture
-  uninterpretedFunctions :: proxy arch -> [(String, Some (Ctx.Assignment BaseTypeRepr), Some BaseTypeRepr)]
+  -- | Extract expressions corresponding to the symbolic offset/immediate value of an OperandComponent
+  operandComponentsImmediate :: proxy sym -> OperandComponents arch sym s -> Maybe (Some (S.SymExpr sym))
+
+  -- | The uninterpreted functions referred to by this architecture. These
+  -- should include readMemUF and writeMemUF
+  uninterpretedFunctions :: proxy arch -> [UninterpFn arch]
+  readMemUF :: Integer -- ^ Number of bits to read, undefined if not in 'uninterpretedFunctions'
+            -> String
+  writeMemUF :: Integer -- ^ Number of bits to read, undefined if not in 'uninterpretedFunctions'
+             -> String
 
   -- | Map an operand to a Crucible expression, given a mapping from each state
   -- variable to a Crucible variable.
@@ -131,8 +158,15 @@ class (IsOperand (Operand arch),
   -- location
   locationFuncInterpretation :: proxy arch -> [(String, FunctionInterpretation t st fs arch)]
 
+
+  -- | Whether the architecture writes data in big-endian or little-endian form, by default
+  archEndianForm :: proxy arch -> LLVM.EndianForm
+
   shapeReprToTypeRepr :: proxy arch -> OperandTypeRepr arch s -> BaseTypeRepr (OperandType arch s)
 
+
+regWidth :: Architecture arch => NatRepr (RegWidth arch)
+regWidth = knownNat
 
 showShapeRepr :: forall arch sh. (IsOperandTypeRepr arch) => Proxy arch -> ShapeRepr arch sh -> String
 showShapeRepr _ rep =
@@ -140,6 +174,95 @@ showShapeRepr _ rep =
       SL.Nil -> ""
       (r SL.:< rep') -> let showr = operandTypeReprSymbol (Proxy @arch) r
                        in showr  ++ " " ++ (showShapeRepr (Proxy @arch) rep')
+
+type family RegWidth arch :: Nat
+
+type HasRegWidth arch = (1 <= RegWidth arch, 16 <= RegWidth arch, KnownNat (RegWidth arch))
+
+data UninterpFn arch where
+  MkUninterpFn :: forall arch args ty.
+                  { uninterpFnName :: String
+                  , uninterpFnArgs :: Ctx.Assignment BaseTypeRepr args
+                  , uninterpFnRes  :: BaseTypeRepr ty
+                  , uninterpFnLive :: forall sym.
+                                      Ctx.Assignment (S.SymExpr sym) args 
+                                   -> [AccessData sym arch]
+                  -- ^ Given some arguments, identify the arguments that might touch memory.
+                  } -> UninterpFn arch
+instance Show (UninterpFn arch) where
+  show (MkUninterpFn name args res _) = name ++ " [ " ++ show args ++ " => " ++ show res ++ " ]"
+
+
+mkUninterpFn :: forall (args :: Ctx.Ctx BaseType) (ty :: BaseType) arch.
+              ( KnownRepr (Ctx.Assignment BaseTypeRepr) args
+              , KnownRepr BaseTypeRepr ty)
+             => String 
+             -> (forall sym. Ctx.Assignment (S.SymExpr sym) args 
+                          -> [AccessData sym arch])
+             -> UninterpFn arch
+mkUninterpFn name liveness = MkUninterpFn name (knownRepr :: Ctx.Assignment BaseTypeRepr args) 
+                                                      (knownRepr :: BaseTypeRepr ty)
+                                                      liveness
+
+-- | Get the representation of the uninterpreted function with the name corresponding to the given string out of the list `uninterpretedfunctions'
+getUninterpFn :: forall arch.
+                 Architecture arch
+              => String
+              -> Maybe (UninterpFn arch)
+getUninterpFn s = go $ uninterpretedFunctions (Proxy @arch)
+  where
+    go :: [UninterpFn arch] -> Maybe (UninterpFn arch)
+    go [] = Nothing
+    go (f@(MkUninterpFn _ _ _ _) : fs) = if s == createSymbolicName (uninterpFnName f)
+                                              then Just f
+                                              else go fs
+
+
+data AccessData sym arch where
+  ReadData  :: S.SymExpr sym (S.BaseBVType (RegWidth arch)) -> AccessData sym arch
+  WriteData :: 1 <= v
+            => S.SymExpr sym (S.BaseBVType (RegWidth arch))
+            -> S.SymExpr sym (S.BaseBVType v)
+            -> AccessData sym arch
+
+instance S.TestEquality (S.SymExpr sym) => Eq (AccessData sym arch) where
+  ReadData e == ReadData e'        | Just _ <- S.testEquality e e' = True
+  WriteData i v == WriteData i' v' | Just _ <- S.testEquality i i' 
+                                   , Just _ <- S.testEquality v v' = True
+  _ == _ = False
+
+instance OrdF (S.SymExpr sym) => Ord (AccessData sym arch) where
+  ReadData e    <= ReadData e'     = e `leqF` e'
+  WriteData e a <= WriteData e' a' = e `ltF` e' || (e `leqF` e' && a `leqF` a')
+  ReadData _    <= WriteData _ _   = True
+  WriteData _ _ <= ReadData _      = False
+
+instance ShowF (S.SymExpr sym) => Show (AccessData sym arch) where
+  show (ReadData i)    = "Read " ++ showF i
+  show (WriteData i v) = "Wrote " ++ showF v ++ " to " ++ showF i
+
+accessAddr :: AccessData sym arch -> S.SymBV sym (RegWidth arch)
+accessAddr (ReadData i) = i
+accessAddr (WriteData i _) = i
+
+-- | A type synonym for the type of memory
+type MemType arch = S.BaseArrayType (Ctx.SingleCtx (S.BaseBVType (RegWidth arch))) (S.BaseBVType 8)
+
+memTypeRepr :: forall arch.
+               Architecture arch
+            => S.BaseTypeRepr (MemType arch)
+memTypeRepr = S.knownRepr
+
+
+taggedExprImmediate :: forall sym arch s proxy.
+                       Architecture arch
+                    => proxy sym
+                    -> TaggedExpr arch sym s
+                    -> Maybe (Some (S.SymExpr sym))
+taggedExprImmediate _   (taggedOperand -> ValueOperand imm)      = Just (Some imm)
+taggedExprImmediate _   (taggedOperand -> LocationOperand _ _)   = Nothing
+taggedExprImmediate sym (taggedOperand -> CompoundOperand oComp) = operandComponentsImmediate @arch sym oComp
+taggedExprImmediate _ _ = error "Other tagged operand"
 
 -- | This type encapsulates an evaluator for operations represented as
 -- uninterpreted functions in semantics.  It may seem strange to interpret
@@ -213,3 +336,7 @@ createSymbolicEntries = foldr duplicateIfDotted []
           let newElt = ("uf_" ++ map (\c -> if c == '.' then '_' else c) s, e)
           in newElt : ("uf." ++ s, e) : acc
 
+createSymbolicName :: String -> String
+createSymbolicName s = case '.' `elem` s of
+                          False -> s
+                          True  -> "uf_" ++ map (\c -> if c == '.' then '_' else c) s

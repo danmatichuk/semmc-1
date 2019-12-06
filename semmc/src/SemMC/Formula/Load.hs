@@ -4,8 +4,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE GADTs #-}
 -- | Utilities for loading formulas from disk
 module SemMC.Formula.Load (
+  formulaEnv,
   loadFormulas,
   loadFormulasFromFiles,
   loadLibrary,
@@ -25,7 +27,6 @@ import qualified System.Directory as S
 import qualified System.FilePath as S
 
 import           Data.Parameterized.Classes
-import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.HasRepr as HR
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Pair as Pair
@@ -54,11 +55,11 @@ formulaEnv proxy sym = do
                        , FE.envUndefinedBit = undefinedBit
                        }
   where
-    toUF :: (String, Some (Ctx.Assignment BaseTypeRepr), Some BaseTypeRepr)
+    toUF :: A.UninterpFn arch
          -> IO (String, (FE.SomeSome (CRU.SymFn sym), Some BaseTypeRepr))
-    toUF (name, Some args, retRep@(Some ret)) = do
+    toUF (A.MkUninterpFn name args ret _) = do
       uf <- FE.SomeSome <$> CRU.freshTotalUninterpFn sym (U.makeSymbol ("uf." ++ name)) args ret
-      return (("uf." ++ name), (uf, retRep))
+      return (("uf." ++ name), (uf, Some ret))
 
 data FormulaParseError = FormulaParseError String String
   deriving (Show)
@@ -78,11 +79,11 @@ loadFormulas :: forall sym arch a
                   , U.HasCallStack
                   , L.HasLogCfg )
                 => sym
+             -> FE.FormulaEnv sym arch
              -> F.Library sym
              -> [(Some a, BS.ByteString)]
              -> IO (MapF.MapF a (F.ParameterizedFormula sym arch))
-loadFormulas sym lib contents = do
-  initEnv <- formulaEnv (Proxy @arch) sym
+loadFormulas sym initEnv lib contents = do
   let env = FE.addLibrary initEnv lib
   F.foldlM (parseFormulaBS env) MapF.empty contents
   where
@@ -95,7 +96,7 @@ loadFormulas sym lib contents = do
       ef <- FP.readFormula sym env (HR.typeRepr op) (T.decodeUtf8 bs)
       case ef of
         Right f -> return (MapF.insert op f m)
-        Left e -> E.throwIO (FormulaParseError (showF op) e)
+        Left e -> putStrLn "Trying to load formulas" >> E.throwIO (FormulaParseError (showF op) e)
 
 -- | Load formulas from disk
 --
@@ -123,12 +124,13 @@ loadFormulasFromFiles :: forall sym arch a
                          , U.HasCallStack
                          , L.HasLogCfg )
                       => sym
+                      -> FE.FormulaEnv sym arch
                       -> F.Library sym
                       -> (forall sh' . a sh' -> FilePath)
                       -> [Some a]
                       -> IO (MapF.MapF a (F.ParameterizedFormula sym arch))
-loadFormulasFromFiles sym lib toFP shapes = do
-  initEnv <- formulaEnv (Proxy @arch) sym
+loadFormulasFromFiles sym initEnv lib toFP shapes = do
+--  initEnv <- formulaEnv (Proxy @arch) sym
   let env = FE.addLibrary initEnv lib
   F.foldlM (\m (Some (op :: a sh)) -> addIfJust (readFormulaForOpcode env) m op) MapF.empty shapes
   where
@@ -173,25 +175,25 @@ loadLibrary :: forall sym arch
                , L.HasLogCfg )
             => Proxy arch
             -> sym
+            -> FE.FormulaEnv sym arch
             -> [(String, BS.ByteString)]
             -> IO (F.Library sym)
-loadLibrary proxy sym contents = do
+loadLibrary _ sym env contents = do
   -- TODO Allow functions to call other functions by somehow loading in
   -- dependency order and adding to the environment as we go. For now, for
   -- predictability's sake, we load everything in the initial environment.
-  env <- formulaEnv proxy sym
-  MapF.fromList <$> mapM (parseFunctionBS env) contents
+--  env <- formulaEnv proxy sym
+  MapF.fromList <$> mapM parseFunctionBS contents
   where
-    parseFunctionBS :: FE.FormulaEnv sym arch
-                    -> (String, BS.ByteString)
+    parseFunctionBS :: (String, BS.ByteString)
                     -> IO (Pair.Pair F.FunctionRef (F.FunctionFormula sym))
-    parseFunctionBS env (name, bs) = do
+    parseFunctionBS (name, bs) = do
       U.logIO U.Info $ "reading formula for defined function " ++ show name
       ef <- FP.readDefinedFunction sym env (T.decodeUtf8 bs)
       case ef of
         Right (Some ff) ->
           return $ Pair.Pair (F.functionRef ff) ff
-        Left e -> E.throwIO (FormulaParseError name e)
+        Left e -> putStrLn "Trying to load library" >> E.throwIO (FormulaParseError name e)
 
 loadLibraryFromFiles :: forall sym arch
                       . ( CRU.IsExprBuilder sym
@@ -202,20 +204,20 @@ loadLibraryFromFiles :: forall sym arch
                         , L.HasLogCfg )
                      => Proxy arch
                      -> sym
+                     -> FE.FormulaEnv sym arch
                      -> FilePath
                      -> IO (F.Library sym)
-loadLibraryFromFiles proxy sym dir = do
+loadLibraryFromFiles _ sym env dir = do
   files <- listFunctionFiles dir
-  env <- formulaEnv proxy sym
+--  env <- formulaEnv proxy sym
   -- TODO Allow functions to call other functions by somehow loading in
   -- dependency order and adding to the environment as we go. For now, for
   -- predictability's sake, we load everything in the initial environment.
-  MapF.fromList <$> mapM (loadFile env) files
+  MapF.fromList <$> mapM loadFile files
   where
-    loadFile :: FE.FormulaEnv sym arch
-             -> FilePath
+    loadFile :: FilePath
              -> IO (Pair.Pair F.FunctionRef (F.FunctionFormula sym))
-    loadFile env origFile = do
+    loadFile origFile = do
       file <- S.canonicalizePath origFile
       U.logIO U.Info $ "loading function file: "++file
       ef <- FP.readDefinedFunctionFromFile sym env file

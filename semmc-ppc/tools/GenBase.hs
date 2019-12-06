@@ -8,7 +8,6 @@ module Main ( main ) where
 import           Control.Exception
 import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
-import           Data.Monoid
 import           Data.Parameterized.Classes
 import           Data.Parameterized.HasRepr
 import           Data.Parameterized.List as SL
@@ -159,7 +158,9 @@ loadFunction :: ( CRUB.IsSymInterface sym
              -> sym
              -> (String, BS.ByteString)
              -> IO (SF.Library sym)
-loadFunction arch sym pair = FL.loadLibrary arch sym [pair]
+loadFunction arch sym pair = do
+  env <- FL.formulaEnv arch sym
+  FL.loadLibrary arch sym env [pair]
 
 checkFormula :: ( Architecture arch
                 , HasRepr (PPC.Opcode PPC.Operand) (SL.List (OperandTypeRepr arch))       , CRUB.IsSymInterface sym
@@ -190,4 +191,6 @@ loadFormula :: ( CRUB.IsSymInterface sym
             -> SF.Library sym
             -> (Some (PPC.Opcode PPC.Operand), BS.ByteString)
             -> IO (MapF.MapF (PPC.Opcode PPC.Operand) (SF.ParameterizedFormula sym arch))
-loadFormula _ sym lib a = FL.loadFormulas sym lib [a]
+loadFormula arch sym lib a = do
+  env <- FL.formulaEnv arch sym
+  FL.loadFormulas sym env lib [a]

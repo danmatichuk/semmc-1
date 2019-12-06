@@ -69,7 +69,7 @@ data A32
 
 data T32
 
-type family ArchRegWidth arch :: Nat
+type ArchRegWidth arch = A.RegWidth arch
 
 class ArchRepr arch where
   regWidthRepr :: proxy arch -> NatRepr (ArchRegWidth arch)
@@ -291,7 +291,7 @@ instance A.IsOperandTypeRepr A32 where
   type OperandTypeRepr A32 = CT.SymbolRepr
   operandTypeReprSymbol _ = T.unpack . CT.symbolRepr
 
-type instance ArchRegWidth A32 = 32
+type instance A.RegWidth A32 = 32
 
 instance ArchRepr A32 where
   regWidthRepr _ = WT.knownNat @32
@@ -333,10 +333,6 @@ instance A.IsLocation (Location A32) where
       zeroMem <- WI.bvLit sym (WT.knownNat @8) 0
       WI.constantArray sym (Ctx.singleton $ BaseBVRepr wRepr) zeroMem
 
-  allLocations =
-    A.registerizationLocations
-    ++ map somePSTATEToSomeLoc allPSTATEs
-    ++ [Some LocPC, Some LocMem]
   registerizationLocations = map (Some . LocGPR . fromIntegral) [(0 :: Int) .. 15]
   isMemoryLocation p = case p of
     LocMem -> True
