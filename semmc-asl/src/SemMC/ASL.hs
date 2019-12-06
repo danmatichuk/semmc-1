@@ -118,6 +118,7 @@ genSimulation :: forall arch sym init globalReads globalWrites tps scope a
 genSimulation symCfg crucFunc extractResult =
   case AC.funcCFG crucFunc of
     CCC.SomeCFG cfg -> do
+      let sym = simSym symCfg
       let sig = AC.funcSig crucFunc
       let argReprNames = FC.fmapFC (\(AT.LabeledValue (AS.FunctionArg nm _ _) v) -> AT.LabeledValue nm v) (AC.funcArgReprs sig)
       initArgs <- FC.traverseFC (allocateFreshArg (simSym symCfg)) argReprNames
@@ -129,7 +130,10 @@ genSimulation symCfg crucFunc extractResult =
       (freshGlobalReads, globalState) <- initGlobals symCfg globalReads
       (s0, funsref) <- initialSimulatorState symCfg globalState econt retRepr
       ft <- executionFeatures (AS.funcName $ AC.funcSig crucFunc) (simSym symCfg)
-      eres <- CS.executeCrucible ft s0
+      p <- CBO.getSolverProcess sym
+      let allBVs = getBVs initArgs ++ getBVs freshGlobalReads
+      eres <- WPO.inNewFrameWithVars p allBVs $ do
+        CS.executeCrucible ft s0
       case eres of
         CS.TimeoutResult {} -> X.throwIO (SimulationTimeout (Some (AC.SomeFunctionSignature sig)))
         CS.AbortedResult context ab -> X.throwIO $ SimulationAbort (Some (AC.SomeFunctionSignature sig)) (showAbortedResult ab)
@@ -140,6 +144,8 @@ genSimulation symCfg crucFunc extractResult =
           result <- extractResult (gp ^. CS.gpValue) initArgs freshGlobalReads
           funenv <- readIORef funsref
           return (result, funenv)
+  where
+    getBVs ctx = FC.toListFC (\(FreshArg _ bv _ _) -> Some bv) ctx
 
 -- | Simulate a function
 --
@@ -500,55 +506,50 @@ allocateFreshArg sym (AC.LabeledValue name rep) = do
   case rep of
     CT.BaseBVRepr w -> do
       sname <- toSolverSymbol (T.unpack name)
-      --bv <- WI.freshBoundVar sym sname (WT.BaseBVRepr w)
-      rv@(WEB.BoundVarExpr bv) <- WI.freshConstant sym sname (WT.BaseBVRepr w)
+      bv <- WI.freshBoundVar sym sname (WT.BaseBVRepr w)
       return $ FreshArg
         ( CS.RegEntry { CS.regType = CT.baseToType rep
-                      , CS.regValue = rv
+                      , CS.regValue = WI.varExpr sym bv
                       } )
         bv
         rep
         name
     CT.BaseIntegerRepr -> do
       sname <- toSolverSymbol (T.unpack name)
-      --bv <- WI.freshBoundVar sym sname WT.BaseIntegerRepr
-      rv@(WEB.BoundVarExpr bv) <- WI.freshConstant sym sname WT.BaseIntegerRepr
+      bv <- WI.freshBoundVar sym sname WT.BaseIntegerRepr
       return $ FreshArg
         ( CS.RegEntry { CS.regType = CT.baseToType rep
-                      , CS.regValue = rv
+                      , CS.regValue = WI.varExpr sym bv
                       } )
         bv
         rep
         name
     CT.BaseBoolRepr -> do
       sname <- toSolverSymbol (T.unpack name)
-      --bv <- WI.freshBoundVar sym sname WT.BaseBoolRepr
-      rv@(WEB.BoundVarExpr bv) <- WI.freshConstant sym sname WT.BaseBoolRepr
+      bv <- WI.freshBoundVar sym sname WT.BaseBoolRepr
       return $ FreshArg
         ( CS.RegEntry { CS.regType = CT.baseToType rep
-                      , CS.regValue = rv
+                      , CS.regValue = WI.varExpr sym bv
                       } )
         bv
         rep
         name
     CT.BaseArrayRepr idxTy vTy -> do
       sname <- toSolverSymbol (T.unpack name)
-      --bv <- WI.freshBoundVar sym sname (WT.BaseArrayRepr idxTy vTy)
-      rv@(WEB.BoundVarExpr bv) <- WI.freshConstant sym sname (WT.BaseArrayRepr idxTy vTy)
+      bv <- WI.freshBoundVar sym sname (WT.BaseArrayRepr idxTy vTy)
       return $ FreshArg
         ( CS.RegEntry { CS.regType = CT.baseToType rep
-                      , CS.regValue = rv
+                      , CS.regValue = WI.varExpr sym bv
                       } )
         bv
         rep
         name
     CT.BaseStructRepr idxTy -> do
       sname <- toSolverSymbol (T.unpack name)
-      --bv <- WI.freshBoundVar sym sname (WT.BaseStructRepr idxTy)
-      rv@(WEB.BoundVarExpr bv) <- WI.freshConstant sym sname (WT.BaseStructRepr idxTy)
+      bv <- WI.freshBoundVar sym sname (WT.BaseStructRepr idxTy)
       return $ FreshArg
         ( CS.RegEntry { CS.regType = CT.baseToType rep
-                      , CS.regValue = rv
+                      , CS.regValue = WI.varExpr sym bv
                       } )
         bv
         rep
