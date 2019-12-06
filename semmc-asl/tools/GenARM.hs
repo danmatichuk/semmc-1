@@ -432,7 +432,10 @@ withOnlineBackend :: forall scope a.
                        -> (CBO.YicesOnlineBackend scope (B.Flags B.FloatReal) -> IO a)
                        -> IO a
 withOnlineBackend gen unsatFeat action = do
-  let feat = Yices.yicesDefaultFeatures .|. CBO.unsatFeaturesToProblemFeatures unsatFeat
+  let feat =     useIntegerArithmetic
+             .|. useBitvectors
+             .|. useStructs
+             .|. CBO.unsatFeaturesToProblemFeatures unsatFeat
   CBO.withOnlineBackend B.FloatRealRepr gen feat $ \sym -> do
     WC.extendConfig Yices.yicesOptions (WI.getConfiguration sym)
     action sym
