@@ -17,6 +17,7 @@ packages:
 optional-packages:
   submodules/crucible/crucible
   submodules/crucible/what4
+  submodules/crucible/what4-serialize
   submodules/crucible/crucible-llvm
   submodules/llvm-pretty
   submodules/parameterized-utils

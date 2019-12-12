@@ -598,11 +598,7 @@ initGlobals symCfg globals = do
       let baseGlobalType = AT.toBaseType (CCG.globalType gv)
       arg <- liftIO $ allocateFreshArg (simSym symCfg) (AC.LabeledValue (CCG.globalName gv) baseGlobalType)
       MS.put $ CSG.insertGlobal gv (CS.regValue (freshArgEntry arg)) gs
-      gs' <- MS.get
-      case CSG.lookupGlobal gv gs' of
-        Just (WEB.BoundVarExpr bv) -> do
-          return arg { freshArgBoundVar = bv }
-        _ -> error "Unexpected global variable type"
+      return arg
 
 executionFeatures :: sym ~ CBO.OnlineBackend scope solver fs
                   => WPO.OnlineSolver scope solver
