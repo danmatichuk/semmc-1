@@ -25,7 +25,6 @@ import           Data.Proxy
 import           GHC.TypeLits ( Symbol )
 import qualified Data.Type.List as TL
 import           Data.IORef
-
 import qualified Control.Exception as X
 import           Control.Lens ( (^.) )
 import           Data.Monoid
@@ -74,7 +73,7 @@ import qualified What4.Protocol.Online as WPO
 
 import qualified What4.Interface as S
 import qualified What4.Expr as S
-import qualified What4.Expr.Builder as WEB
+import qualified What4.Expr.Builder as S
 
 import qualified SemMC.Formula as SF
 import qualified SemMC.ASL.Crucible as AC
@@ -92,10 +91,10 @@ import qualified SemMC.BoundVar as BV
 data SimulatorConfig scope =
   SimulatorConfig { simOutputHandle :: IO.Handle
                   , simHandleAllocator :: CFH.HandleAllocator
-                  , simSym :: CBO.YicesOnlineBackend scope (WEB.Flags WEB.FloatReal)
+                  , simSym :: CBO.YicesOnlineBackend scope (S.Flags S.FloatReal)
                   }
 
-type OnlineSolver scope sym = sym ~ CBO.YicesOnlineBackend scope (WEB.Flags WEB.FloatReal)
+type OnlineSolver scope sym = sym ~ CBO.YicesOnlineBackend scope (S.Flags S.FloatReal)
 
 reshape :: Ctx.Assignment CT.BaseTypeRepr btps -> PL.List WT.BaseTypeRepr (AT.CtxToList btps)
 reshape Ctx.Empty = PL.Nil
@@ -114,7 +113,7 @@ genSimulation :: forall arch sym init globalReads globalWrites tps scope a
                   -> Ctx.Assignment (FreshArg sym) init
                   -> Ctx.Assignment (FreshArg sym) globalReads
                   -> IO a)
-              -> IO (a, AE.SymFnEnv sym)
+              -> IO a
 genSimulation symCfg crucFunc extractResult =
   case AC.funcCFG crucFunc of
     CCC.SomeCFG cfg -> do
@@ -141,9 +140,7 @@ genSimulation symCfg crucFunc extractResult =
           gp <- case pres of
             CS.TotalRes gp -> return gp
             CS.PartialRes _ _ gp _ -> return gp
-          result <- extractResult (gp ^. CS.gpValue) initArgs freshGlobalReads
-          funenv <- readIORef funsref
-          return (result, funenv)
+          extractResult (gp ^. CS.gpValue) initArgs freshGlobalReads
   where
     getBVs ctx = FC.toListFC (\(FreshArg _ bv _ _) -> Some bv) ctx
 
@@ -157,7 +154,7 @@ simulateFunction :: forall arch sym init globalReads globalWrites tps scope
                   . (CB.IsSymInterface sym, OnlineSolver scope sym)
                  => SimulatorConfig scope
                  -> AC.Function arch globalReads globalWrites init tps
-                 -> IO (SF.FunctionFormula sym '(AT.CtxToList (init Ctx.::> WT.BaseStructType globalReads), WT.BaseStructType (AS.FuncReturnCtx globalWrites tps)), AE.SymFnEnv sym)
+                 -> IO (S.ExprSymFn scope (init Ctx.::> WT.BaseStructType globalReads) (WT.BaseStructType (AS.FuncReturnCtx globalWrites tps)))
 simulateFunction symCfg crucFunc = genSimulation symCfg crucFunc extractResult
   where
     sig = AC.funcSig crucFunc
@@ -182,18 +179,16 @@ simulateFunction symCfg crucFunc = genSimulation symCfg crucFunc extractResult
               FreshArg gre gbv _ _ <- allocateFreshArg sym (AC.LabeledValue "globalReads" globalReadStructRepr)
               let globalStruct = WI.varExpr sym gbv
               globals <- Ctx.traverseWithIndex (\idx _ -> WI.structField sym globalStruct idx) globalReadReprs
-              fnexpr <- WEB.evalBoundVars sym (CS.regValue re) globalReadBVs globals
+              fnexpr <- S.evalBoundVars sym (CS.regValue re) globalReadBVs globals
               --print (WI.printSymExpr fnexpr)
-              let allArgBvs = TL.toAssignmentFwd $ AT.assignmentToList (argBVs Ctx.:> gbv)
+              let allArgBvs = (argBVs Ctx.:> gbv)
               fn <- WI.definedFn
                 sym
                 solverSymbolName
                 allArgBvs
                 fnexpr
-                (const False)
-              let argTypes = AT.assignmentToList (argReprs Ctx.:> WT.BaseStructRepr globalReadReprs)
-              let argVars = AT.assignmentToList (argBVs Ctx.:> gbv)
-              return $ SF.FunctionFormula name argTypes argVars retType fn
+                (const False )
+              return $ fn
           | otherwise -> X.throwIO (UnexpectedReturnType btr)
 
 
@@ -201,7 +196,7 @@ simulateInstruction :: forall sym init globalReads globalWrites tps scope
                      . (CB.IsSymInterface sym, OnlineSolver scope sym)
                     => SimulatorConfig scope
                     -> AC.Function A32 globalReads globalWrites init tps
-                    -> IO (Some (SF.ParameterizedFormula sym A32), AE.SymFnEnv sym)
+                    -> IO (Some (SF.ParameterizedFormula sym A32))
 simulateInstruction symCfg crucFunc = genSimulation symCfg crucFunc extractResult
   where
     sig = AC.funcSig crucFunc

@@ -40,7 +40,7 @@ import           Data.Parameterized.Nonce
 import           Data.Bits( (.|.) )
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
+import qualified Data.Text.IO as T
 
 import qualified Data.List as List
 import qualified Data.List.Split as List
@@ -120,6 +120,7 @@ data TranslatorOptions = TranslatorOptions
   , optTranslationTask :: TranslationTask
   , optTranslationDepth :: TranslationDepth
   , optCheckSerialization :: Bool
+  , optFormulaOutputFilePath :: FilePath
   }
 
 
@@ -163,6 +164,7 @@ defaultOptions = TranslatorOptions
   , optTranslationDepth = TranslateRecursive
   , optTranslationTask = TranslateArch32
   , optCheckSerialization = False
+  , optFormulaOutputFilePath = "./formulas.what4"
   }
 
 data StatOptions = StatOptions
@@ -181,7 +183,6 @@ defaultStatOptions = StatOptions
   , reportAllExceptions = False
   , reportKnownExceptionFilter = (\_ -> True)
   , reportFunctionDependencies = False
-  , reportFunctionFormulas = False
   }
 
 arguments :: [OptDescr (Either (TranslatorOptions -> Maybe TranslatorOptions) (StatOptions -> Maybe StatOptions))]
@@ -221,11 +222,11 @@ arguments =
   , Option [] ["report-exceptions"] (NoArg (Right (\opts -> Just $ opts { reportAllExceptions = True })))
     "Print all collected exceptions thrown during translation (requires collect-exceptions or collect-expected-exceptions)"
 
+  , Option "o" ["output-formulas"] (ReqArg (\f -> Left (\opts -> Just $ opts { optFormulaOutputFilePath = f })) "PATH")
+
+   "Path to serialized formulas."
   , Option [] ["report-expected-exceptions"] (NoArg (Right (\opts -> Just $ opts {reportKnownExceptions = True })))
     "Print collected exceptions for known issues thrown during translation (requires collect-exceptions or collect-expected-exceptions)"
-
-  , Option [] ["report-formulas"] (NoArg (Right (\opts -> Just $ opts { reportFunctionFormulas = True })))
-    "Print function formulas for all successfully simulated functions."
 
   , Option [] ["translation-mode"] (ReqArg (\mode -> Left (\opts -> do
       task <- case mode of
@@ -280,7 +281,8 @@ main = do
         TranslateNoArch64 -> runWithFilters (opts { optFilters = translateNoArch64 } )
         TranslateArch32 -> runWithFilters (opts { optFilters = translateArch32 } )
       reportStats statOpts sm
-
+      logMsgIO opts 1 $ T.pack $ "Writing formulas to: " ++ show (optFormulaOutputFilePath opts)
+      T.writeFile (optFormulaOutputFilePath opts) (WP.printSymFnEnv (sFormulas sm))
   where
     applyOption (Just (opts, statOpts)) arg = case arg of
       Left f -> do
@@ -323,9 +325,11 @@ runWithFilters' opts spec sigEnv sigState = do
         if test ident then Just (ident, instr) else Nothing
   let allInstrs = imap (\i -> \nm -> (i,nm)) $ mapMaybe getInstr (collectInstructions (aslInstructions spec))
   let instrs = case numInstrs of {Just i -> take i (drop startidx allInstrs); _ -> drop startidx allInstrs}
-  execSigMapWithScope opts sigState sigEnv $ forM_ instrs $ \(i, (ident, instr)) -> do
-     logMsg 1 $ T.pack $ "Processing instruction: " ++ show i ++ "/" ++ show (length allInstrs)
-     runTranslation instr ident
+  execSigMapWithScope opts sigState sigEnv $ do
+    forM_ instrs $ \(i, (ident, instr)) -> do
+      logMsg 1 $ T.pack $ "Processing instruction: " ++ show i ++ "/" ++ show (length allInstrs)
+      runTranslation instr ident
+
 
 
 runTranslation :: IsARMArch arch
@@ -412,7 +416,7 @@ execSigMapWithScope :: TranslatorOptions
                     -> IO (SomeSigMap)
 execSigMapWithScope opts sigState sigEnv action = do
   handleAllocator <- CFH.newHandleAllocator
-  let nonceGenerator = NonceGeneratorSym $ globalNonceGenerator
+  let nonceGenerator = globalNonceGenerator
   let sigMap =
         SigMap {
           sMap = Map.empty
@@ -426,7 +430,6 @@ execSigMapWithScope opts sigState sigEnv action = do
           , sOptions = opts
           , sNonceGenerator = nonceGenerator
           , sHandleAllocator = handleAllocator
-          , sFormulaEnv = FormulaEnv $ Map.empty
           }
   SomeSigMap <$> execSigMapM action sigMap
 
@@ -467,13 +470,6 @@ translateFunction fromInstr key sig stmts defs = do
   logMsg 1 $ T.pack $ "Rough function body size:" ++ show (measureStmts stmts)
   handleAllocator <- MSS.gets sHandleAllocator
   logLvl <- MSS.gets (optVerbosity . sOptions)
-  case key of
-    KeyFun nm -> do
-      let args = Some $ (AC.funcSigAllArgsRepr sig)
-      let ret = Some (AC.funcSigBaseRepr sig)
-      FormulaEnv fenv <- MSS.gets sFormulaEnv
-      MSS.modify' $ \s -> s { sFormulaEnv = FormulaEnv $ Map.insert nm (args, ret) fenv }
-    _ -> return ()
   catchIO key $ AC.functionToCrucible defs sig handleAllocator stmts logLvl
 
 
@@ -520,7 +516,6 @@ data SimulationException =
     SimulationDeserializationFailure String T.Text
   | SimulationDeserializationMismatch String String
   | SimulationFailure
-
 instance Show SimulationException where
   show se = case se of
     SimulationDeserializationFailure err formula ->
@@ -543,53 +538,44 @@ simulateFunction :: forall arch sym globalReads globalWrites init tps
 simulateFunction fromInstr key deps p = do
   logMsg 1 $ T.pack $ "Simulating: " ++ prettyKey key
   checkSerialization <- MSS.gets (optCheckSerialization . sOptions)
-  gfenv <- MSS.gets sFormulaEnv
   opts <- MSS.gets sOptions
   handleAllocator <- MSS.gets sHandleAllocator
-  NonceGeneratorSym nonceGenerator <- MSS.gets sNonceGenerator
+  nonceGenerator <- MSS.gets sNonceGenerator
   mresult <- catchIO key $
     withOnlineBackend nonceGenerator CBO.NoUnsatFeatures $ \backend -> do
       let cfg = ASL.SimulatorConfig { simOutputHandle = IO.stdout
                                     , simHandleAllocator = handleAllocator
                                     , simSym = backend
-                                    } 
-      case key of
-        KeyInstr _ -> do
-          (symInstr, _) <- ASL.simulateInstruction cfg p
-          return $ Left ()
-        KeyFun nm -> do
-          when checkSerialization $ B.startCaching backend
-          (fformula, _) <- ASL.simulateFunction cfg p
-          let (SF.FunctionFormula _ argTypes argVars retType symFn) = fformula
-          
-          let (serializedSymFn, fenv) = WP.printSymFn' symFn
-          ex <- if checkSerialization then do
-            lcfg <- U.mkLogCfg "check serialization"
-            res <- U.withLogCfg lcfg $
-              WP.readSymFn backend fenv (\_ -> return Nothing) serializedSymFn
-            case res of
-              Left err -> do
-                return $ Just $ SimulationDeserializationFailure err serializedSymFn
-              Right (U.SomeSome symFn') -> do
-                logMsgIO opts 1 $ "Serialization/Deserialization succeeded."
-                checkSymFnEquality backend symFn symFn' >>= \case
-                  Nothing -> do
-                    logMsgIO opts 1 $ "Deserialized function matches."
-                    return Nothing
-                  Just err -> do
-                    logMsgIO opts 1 $ "Mismatch in deserialized function."
-                    return $ Just err
-            else return Nothing
-          return $ Right (nm, Some symFn, serializedSymFn, ex)
+                                    }
+      let nm = prettyKey key
+      when checkSerialization $ B.startCaching backend
+      symFn <- ASL.simulateFunction cfg p
+
+      ex <- if checkSerialization then do
+        let (serializedSymFn, fenv) = WP.printSymFn' symFn
+        lcfg <- U.mkLogCfg "check serialization"
+        res <- U.withLogCfg lcfg $
+          WP.readSymFn backend fenv (\_ -> return Nothing) serializedSymFn
+        case res of
+          Left err -> do
+            return $ Just $ SimulationDeserializationFailure err serializedSymFn
+          Right (U.SomeSome symFn') -> do
+            logMsgIO opts 1 $ "Serialization/Deserialization succeeded."
+            checkSymFnEquality backend symFn symFn' >>= \case
+              Nothing -> do
+                logMsgIO opts 1 $ "Deserialized function matches."
+                return Nothing
+              Just err -> do
+                logMsgIO opts 1 $ "Mismatch in deserialized function."
+                return $ Just err
+        else return Nothing
+      return $ (nm, symFn, ex)
   case mresult of
-    Just result -> do
+    Just (nm, symFn, mex) -> do
       logMsg 1 "Simulation succeeded!"
-      case result of
-        Right (nm, Some symFn, serializedSymFn, mex) -> do
-          MSS.modify $ \s -> s { sFormulas = Map.insert key serializedSymFn (sFormulas s) }
-          case mex of
-            Just ex -> void $ catchIO key $ X.throw ex
-            _ -> return ()
+      MSS.modify $ \s -> s { sFormulas = Map.insert (T.pack (prettyKey key)) (U.SomeSome symFn) (sFormulas s) }
+      case mex of
+        Just ex -> void $ catchIO key $ X.throw ex
         _ -> return ()
     _ -> X.throw $ SimulationFailure
 
@@ -745,12 +731,6 @@ reportStats sopts sm = do
       return $ Just ident
     else return Nothing) (instrDeps sm)
   putStrLn $ "Number of successfully translated functions: " <> show (Map.size $ r)
-  when (reportFunctionFormulas sopts) $ do
-    putStrLn $ "Successfully simulated functions"
-    putStrLn $ "-------------------------------"
-    forMwithKey_ (sFormulas sm) $ \k formula -> do
-      putStrLn $ prettyKey k
-      putStrLn $ T.unpack $ formula
   where
     reverseDependencyMap =
         Map.fromListWith (++) $ concat $ map (\(instr, funs) -> map (\fun -> (fun, [instr])) (Set.toList funs))
@@ -773,7 +753,7 @@ reportStats sopts sm = do
       Nothing -> id
 
 prettyIdent :: InstructionIdent -> String
-prettyIdent (InstructionIdent nm enc iset) = show nm <> " " <> show enc <> " " <> show iset
+prettyIdent (InstructionIdent nm enc iset) = show nm <> "_" <> show enc <> "_" <> show iset
 
 prettyKey :: ElemKey -> String
 prettyKey (KeyInstr ident) = prettyIdent ident
@@ -799,7 +779,6 @@ data InstructionIdent =
   InstructionIdent { iName :: T.Text, iEnc :: T.Text, iSet :: AS.InstructionSet }
   deriving (Eq, Show)
 
-deriving instance Ord AS.InstructionSet
 deriving instance Read AS.InstructionSet
 deriving instance Ord InstructionIdent
 
@@ -823,52 +802,43 @@ data ElemKey =
 
 
 -- FIXME: Seperate this into RWS
-data SigMap sym arch where
-  SigMap :: CBO.YicesOnlineBackend scope (B.Flags B.FloatReal) ~ sym =>
-            { sMap :: Map.Map T.Text (Some (SomeFunctionSignature))
+data SigMap scope arch where
+  SigMap :: { sMap :: Map.Map T.Text (Some (SomeFunctionSignature))
             , instrExcepts :: Map.Map InstructionIdent TranslatorException
             , funExcepts :: Map.Map T.Text TranslatorException
             , sigState :: SigState
             , sigEnv :: SigEnv
             , instrDeps :: Map.Map InstructionIdent (Set.Set T.Text)
             , funDeps :: Map.Map T.Text (Set.Set T.Text)
-            , sFormulas :: Map.Map ElemKey T.Text
+            , sFormulas :: Map.Map T.Text (U.SomeSome (B.ExprSymFn scope))
             , sOptions :: TranslatorOptions
-            , sNonceGenerator :: NonceGeneratorSym sym
+            , sNonceGenerator :: NonceGenerator IO scope
             , sHandleAllocator :: CFH.HandleAllocator
-            , sFormulaEnv :: FormulaEnv arch
-            } -> SigMap sym arch
+            } -> SigMap scope arch
 
 data SomeSigMap where
-  SomeSigMap :: SigMap sym arch -> SomeSigMap
+  SomeSigMap :: forall scope arch. SigMap scope arch -> SomeSigMap
 
-data FormulaEnv arch =
-  FormulaEnv (Map.Map T.Text (Some (Ctx.Assignment WI.BaseTypeRepr), Some WI.BaseTypeRepr))
+type SigMapM scope arch a = MSS.StateT (SigMap scope arch) IO a
 
-data NonceGeneratorSym sym where
-  NonceGeneratorSym :: CBO.YicesOnlineBackend scope (B.Flags B.FloatReal) ~ sym => NonceGenerator IO scope
-    -> NonceGeneratorSym sym
-
-type SigMapM sym arch a = MSS.StateT (SigMap sym arch) IO a
-
-runSigMapM :: SigMapM sym arch a -> SigMap sym arch -> IO (a, SigMap sym arch)
+runSigMapM :: SigMapM scope arch a -> SigMap scope arch -> IO (a, SigMap scope arch)
 runSigMapM m = MSS.runStateT m
 
-execSigMapM :: SigMapM sym arch a -> SigMap sym arch -> IO (SigMap sym arch)
+execSigMapM :: SigMapM scope arch a -> SigMap scope arch -> IO (SigMap scope arch)
 execSigMapM m = MSS.execStateT m
 
 --instance TR.MonadLog SigMapM where
-logMsg :: Integer -> T.Text -> SigMapM sym arch ()
+logMsg :: Integer -> T.Text -> SigMapM scope arch ()
 logMsg logLvl msg = do
   verbosity <- MSS.gets (optVerbosity . sOptions)
   when (verbosity >= logLvl) $ liftIO $ putStrLn $ T.unpack $ msg
 
 
-printLog :: [T.Text] -> SigMapM sym arch ()
+printLog :: [T.Text] -> SigMapM scope arch ()
 printLog [] = return ()
 printLog log = liftIO $ putStrLn (T.unpack $ T.unlines log)
 
-liftSigM :: ElemKey -> SigM ext f a -> SigMapM sym arch (Either SigException a)
+liftSigM :: ElemKey -> SigM ext f a -> SigMapM scope arch (Either SigException a)
 liftSigM k f = do
   state <- MSS.gets sigState
   env <- MSS.gets sigEnv
@@ -884,7 +854,7 @@ liftSigM k f = do
       collectExcept k (SExcept k err)
       return $ Left err
 
-collectExcept :: ElemKey -> TranslatorException -> SigMapM sym arch ()
+collectExcept :: ElemKey -> TranslatorException -> SigMapM scope arch ()
 collectExcept k e = do
   collectAllExceptions <- MSS.gets (optCollectAllExceptions . sOptions)
   collectExpectedExceptions <- MSS.gets (optCollectExpectedExceptions . sOptions)
@@ -894,7 +864,7 @@ collectExcept k e = do
     KeyFun fun -> MSS.modify' $ \s -> s { funExcepts = Map.insert fun e (funExcepts s) }
   else X.throw e
 
-catchIO :: ElemKey -> IO a -> SigMapM sym arch (Maybe a)
+catchIO :: ElemKey -> IO a -> SigMapM scope arch (Maybe a)
 catchIO k f = do
   a <- liftIO ((Left <$> f)
                   `X.catch` (\(e :: TranslationException) -> return $ Right $ TExcept k e)
@@ -909,7 +879,7 @@ type InstructionFlag = ()
 
 getTargetInstrs :: TranslatorOptions -> IO (Map.Map InstructionIdent InstructionFlag)
 getTargetInstrs opts = do
-  t <- TIO.readFile ((optASLSpecFilePath opts) ++ targetInstsFilePath)
+  t <- T.readFile ((optASLSpecFilePath opts) ++ targetInstsFilePath)
   return $ Map.fromList (map getTriple (T.lines t))
   where
     isQuote '\"' = True
