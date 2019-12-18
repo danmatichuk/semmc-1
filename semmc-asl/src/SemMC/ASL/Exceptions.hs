@@ -8,7 +8,6 @@ module SemMC.ASL.Exceptions (
 
 import qualified Control.Exception as X
 import qualified Data.Text as T
-import qualified Data.Map as Map
 import qualified Data.Parameterized.Context as Ctx
 import qualified Lang.Crucible.Types as CT
 import qualified What4.BaseTypes as WT

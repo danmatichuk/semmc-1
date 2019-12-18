@@ -62,9 +62,6 @@ import           Data.Parameterized.Classes
 import qualified Data.BitVector.Sized as BVS
 import qualified Language.ASL.Syntax as AS
 import qualified Data.Map as Map
-import qualified Data.List as List
-import qualified Data.Type.List as TL
-import qualified Data.Set as Set
 
 type family ToBaseType (ctp :: CT.CrucibleType) :: WT.BaseType where
   ToBaseType (CT.BaseToType bt) = bt
@@ -121,7 +118,7 @@ baseCrucProof (wtps Ctx.:> _) = case baseCrucProof wtps of
 
 toFromBaseProof :: CT.TypeRepr tp -> Maybe (tp :~: CT.BaseToType (ToBaseType tp))
 toFromBaseProof repr = case CT.asBaseType repr of
-  CT.AsBaseType brepr -> Just Refl
+  CT.AsBaseType _ -> Just Refl
   _ -> Nothing
 
 fromBaseIndex :: Ctx.Assignment CT.BaseTypeRepr bctx
@@ -131,17 +128,19 @@ fromBaseIndex :: Ctx.Assignment CT.BaseTypeRepr bctx
 fromBaseIndex breprs creprs ix =
   case Ctx.intIndex (Ctx.indexVal ix) (Ctx.size creprs) of
     Just (Some ix') | Just Refl <- testEquality (creprs Ctx.! ix') (CT.baseToType $ breprs Ctx.! ix) -> ix'
+    _ -> error "Impossible"
 
 
 toBaseIndex :: Ctx.Assignment CT.BaseTypeRepr bctx
             -> Ctx.Assignment CT.TypeRepr (ToCrucTypes bctx)
             -> Ctx.Index (ToCrucTypes bctx) tp
             -> Ctx.Index bctx (ToBaseType tp)
-toBaseIndex breprs creprs ix = do
-  case CT.asBaseType (creprs Ctx.! ix) of
-    CT.AsBaseType brepr ->
-      case Ctx.intIndex (Ctx.indexVal ix) (Ctx.size breprs) of
-        Just (Some ix') | Just Refl <- testEquality brepr (breprs Ctx.! ix') -> ix'
+toBaseIndex breprs creprs ix
+  | CT.AsBaseType brepr <- CT.asBaseType (creprs Ctx.! ix)
+  , Just (Some ix') <- Ctx.intIndex (Ctx.indexVal ix) (Ctx.size breprs)
+  , Just Refl <- testEquality brepr (breprs Ctx.! ix') =
+    ix'
+toBaseIndex _ _ _ = error "Impossible"
 
 data LabeledValue a b tp = LabeledValue a (b tp)
 
@@ -213,9 +212,6 @@ userTypeRepr ut =
   case ut of
     UserEnum _ -> WT.BaseIntegerRepr
     UserStruct tps -> WT.BaseStructRepr (FC.fmapFC projectValue tps)
-
-type Bitvector = [Bool]
-
 
 letInStmt :: [T.Text] -> [AS.Stmt] -> AS.Stmt
 letInStmt vars stmts = AS.StmtFor "LetIn" (AS.ExprTuple (map AS.ExprLitString vars), AS.ExprTuple []) stmts

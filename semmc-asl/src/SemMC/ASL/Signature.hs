@@ -33,8 +33,6 @@ module SemMC.ASL.Signature (
   , FunctionArg(..)
   ) where
 
-import           Data.Parameterized.Ctx ( type (<+>) )
-import           Data.Parameterized.Context ( (<++>) )
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as FC
@@ -84,10 +82,6 @@ projectStruct :: Ctx.Assignment (LabeledValue T.Text WT.BaseTypeRepr) ctx
               -> WT.BaseTypeRepr (CT.BaseStructType ctx)
 projectStruct asn = CT.BaseStructRepr (FC.fmapFC projectValue asn)
 
-funcRetCRepr :: FunctionSignature globalReads globalWrites init tps
-             -> CT.TypeRepr (CT.BaseToType (CT.BaseStructType tps))
-funcRetCRepr fSig = CT.SymbolicStructRepr (funcRetRepr fSig)
-
 funcSigRepr :: FunctionSignature globalReads globalWrites init tps
                -> CT.TypeRepr (FuncReturn globalWrites tps)
 funcSigRepr fSig = CT.SymbolicStructRepr
@@ -130,8 +124,6 @@ data SimpleFunctionSignature globalReads globalWrites  =
                            -- ^ The return type of the function
                            , sfuncArgs :: [FunctionArg]
                            -- ^ The types of the natural arguments of the function
-                           , sfuncRegisterIdx :: [T.Text]
-                           -- ^
                            , sfuncGlobalReadReprs :: Ctx.Assignment (LabeledValue T.Text WT.BaseTypeRepr) globalReads
                            -- ^ The globals (transitively) referenced by the function
                            , sfuncGlobalWriteReprs :: Ctx.Assignment (LabeledValue T.Text WT.BaseTypeRepr) globalWrites

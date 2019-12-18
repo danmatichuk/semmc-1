@@ -22,12 +22,10 @@ import qualified Control.Exception as X
 import           Control.Lens ( (^.), (&), (.~) )
 import           Control.Monad ( guard )
 import           Data.IORef
-import           Data.Functor.Product ( Product(..) )
 import           Data.Map ( Map )
 import qualified Data.Map as Map
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
-import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableFC as FC
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T
@@ -77,11 +75,11 @@ data ASLApp f tp where
   MkBaseStruct :: Ctx.Assignment CT.TypeRepr ctx
                -> Ctx.Assignment f ctx
                -> ASLApp f (CT.SymbolicStructType (ToBaseTypes ctx))
-  SetBaseStruct :: Ctx.Assignment CT.TypeRepr ctx
-                -> f (CT.SymbolicStructType (ToBaseTypes ctx))
-                -> Ctx.Index ctx tp
-                -> f tp
-                -> ASLApp f (CT.SymbolicStructType (ToBaseTypes ctx))
+  -- SetBaseStruct :: Ctx.Assignment CT.TypeRepr ctx
+  --               -> f (CT.SymbolicStructType (ToBaseTypes ctx))
+  --               -> Ctx.Index ctx tp
+  --               -> f tp
+  --               -> ASLApp f (CT.SymbolicStructType (ToBaseTypes ctx))
 
 -- | The statement extension type
 --
@@ -183,30 +181,6 @@ readBaseGlobal gs (BaseGlobalVar gv) =
 
 -- | A wrapper around 'WI.SymExpr' because it is a type family and not injective
 data SymExpr' sym tp = SE { unSE :: WI.SymExpr sym tp }
-
-fstFC :: Product f g a -> f a
-fstFC (Pair f _) = f
-
-sndFC :: Product f g a -> g a
-sndFC (Pair _ g) = g
-
-extractBase :: WI.IsExprBuilder sym
-            => T.Text
-            -> (forall tp1 . f tp1 -> IO (CS.RegValue' sym tp1))
-            -> Ctx.Assignment CT.TypeRepr tps
-            -> Ctx.Assignment f tps
-            -> Some (Ctx.Assignment (Product WT.BaseTypeRepr (SymExpr' sym)))
-            -> IO (Some (Ctx.Assignment (Product WT.BaseTypeRepr (SymExpr' sym))))
-extractBase fname evalExpr tps vals (Some acc) = do
-  case (Ctx.viewAssign tps, Ctx.viewAssign vals) of
-    (Ctx.AssignEmpty, Ctx.AssignEmpty) -> return (Some acc)
-    (Ctx.AssignExtend restReps rep, Ctx.AssignExtend restVals val) -> do
-      case CT.asBaseType rep of
-        CT.NotBaseType -> X.throwIO (ExpectedBaseTypeArgument fname rep)
-        CT.AsBaseType btr -> do
-          CS.RV se <- evalExpr val
-          let acc' = Ctx.extend acc (Pair btr (SE se))
-          extractBase fname evalExpr restReps restVals (Some acc')
 
 extractBase' :: WI.IsExprBuilder sym
              => (forall tp . f tp -> IO (CS.RegValue' sym tp))

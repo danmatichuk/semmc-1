@@ -49,11 +49,9 @@ module SemMC.ASL.Crucible (
 
 import           Control.Monad ( when )
 import qualified Control.Exception as X
-import           Control.Monad.ST ( stToIO, RealWorld, ST )
+import           Control.Monad.ST ( stToIO, ST )
 import qualified Data.Map as Map
 import qualified Data.STRef as STRef
-import qualified Data.Bimap as BM
-import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.Nonce ( newSTNonceGenerator )
@@ -79,16 +77,12 @@ import qualified Language.ASL.Syntax as AS
 import           SemMC.ASL.Extension ( ASLExt, ASLApp(..), ASLStmt(..), aslExtImpl )
 import           SemMC.ASL.Exceptions ( TranslationException(..), LoggedTranslationException(..) )
 import           SemMC.ASL.Signature
-import           SemMC.ASL.Translation ( UserType(..), TranslationState(..), Overrides(..), Definitions(..), InnerGenerator, translateStatement, overrides, addExtendedTypeData, throwTrace, unliftGenerator)
-import qualified SemMC.ASL.SyntaxTraverse as TR
+import           SemMC.ASL.Translation ( UserType(..), TranslationState(..), Overrides(..), Definitions(..), InnerGenerator, translateStatement, overrides, addExtendedTypeData, unliftGenerator)
 import           SemMC.ASL.Types
 import           SemMC.ASL.StaticExpr
-import qualified Control.Monad.State.Class as MS
 
-import qualified Lang.Crucible.CFG.Core as CCC
 import qualified Lang.Crucible.CFG.Extension as CCExt
 
-import System.IO.Unsafe -- FIXME: For debugging
 
 data Function arch globalReads globalWrites init tps =
    Function { funcSig :: FunctionSignature globalReads globalWrites init tps
@@ -135,11 +129,11 @@ functionToCrucible defs sig hdlAlloc stmts logLvl = do
   globalReads <- FC.traverseFC allocateGlobal (funcGlobalReadReprs sig)
   let pos = WP.InternalPos
   (CCG.SomeCFG cfg0, depends) <- (do
-    (result, log) <- stToIO $ defineCCGFunction pos hdl
+    (result, log') <- stToIO $ defineCCGFunction pos hdl
       (\refs -> funcDef defs sig refs globalReads stmts logLvl)
-    when (logLvl >= 5) $ printLog $ log
+    when (logLvl >= 5) $ printLog $ log'
     return result)
-    `X.catch` (\(LoggedTranslationException log e) -> printLog log >> X.throw e)
+    `X.catch` (\(LoggedTranslationException log' e) -> printLog log' >> X.throw e)
   return $
        Function { funcSig = sig
                 , funcCFG = CCS.toSSA cfg0
@@ -153,7 +147,7 @@ functionToCrucible defs sig hdlAlloc stmts logLvl = do
 
 printLog :: [T.Text] -> IO ()
 printLog [] = return ()
-printLog log = putStrLn (T.unpack $ T.unlines $ List.reverse $ log)
+printLog log' = putStrLn (T.unpack $ T.unlines $ List.reverse $ log')
 
 defineCCGFunction :: CCExt.IsSyntaxExtension ext
                => WP.Position
@@ -166,9 +160,9 @@ defineCCGFunction p h f = do
     funDepRef <- STRef.newSTRef Set.empty
     logRef <- STRef.newSTRef []
     (cfg, _) <- CCG.defineFunction p ng h (f (funDepRef, logRef))
-    log <- STRef.readSTRef logRef
+    log' <- STRef.readSTRef logRef
     funDeps <- STRef.readSTRef funDepRef
-    return ((cfg, funDeps), log)
+    return ((cfg, funDeps), log')
 
 funcDef :: (ReturnsGlobals ret globalWrites tps)
         => Definitions arch
@@ -180,7 +174,7 @@ funcDef :: (ReturnsGlobals ret globalWrites tps)
         -> Ctx.Assignment (CCG.Atom s) (ToCrucTypes init)
         -> (TranslationState h ret s, InnerGenerator h s arch ret (CCG.Expr (ASLExt arch) s ret))
 funcDef defs sig hdls globalReads stmts logLvl args =
-  (funcInitialState defs sig hdls logLvl globalReads args, defineFunction overrides sig globalReads stmts args)
+  (funcInitialState defs sig hdls logLvl globalReads args, defineFunction overrides sig stmts args)
 
 funcInitialState :: forall init globalReads globalWrites tps h s arch ret
                   . (ReturnsGlobals ret globalWrites tps)
@@ -226,11 +220,10 @@ projectFunctionName (LabeledValue (FunctionArg nm _ _) _) = nm
 defineFunction :: (ReturnsGlobals ret globalWrites tps)
                => Overrides arch
                -> FunctionSignature globalReads globalWrites init tps
-               -> Ctx.Assignment BaseGlobalVar globalReads
                -> [AS.Stmt]
                -> Ctx.Assignment (CCG.Atom s) (ToCrucTypes init)
                -> InnerGenerator h s arch ret (CCG.Expr (ASLExt arch) s ret)
-defineFunction ov sig baseGlobals stmts _args = do
+defineFunction ov sig stmts _args = do
   unliftGenerator $ FC.forFC_ (funcArgReprs sig) (\(LabeledValue (FunctionArg nm t _) _) -> addExtendedTypeData nm t)
   unliftGenerator $ mapM_ (translateStatement ov) stmts
   case funcRetRepr sig of

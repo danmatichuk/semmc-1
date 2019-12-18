@@ -53,11 +53,10 @@ import           Data.List (nub)
 import qualified Data.Set as Set
 import qualified Data.Map as Map
 import qualified Data.List as List
-import           Data.Maybe (maybeToList, catMaybes, fromMaybe, listToMaybe, isJust, mapMaybe)
+import           Data.Maybe (catMaybes)
 import           SemMC.ASL.Types
 import qualified SemMC.ASL.SyntaxTraverse as AS ( pattern VarName )
 import           Data.Foldable ( traverse_ )
-import qualified Control.Monad.State as MSS
 
 
 bitsToInteger :: [Bool] -> Integer
@@ -169,7 +168,7 @@ exprToStaticType :: StaticEnv env
                  => env
                  -> AS.Expr
                  -> Maybe StaticType
-exprToStaticType env e = case e of
+exprToStaticType env expr = case expr of
   AS.ExprVarRef (AS.QualifiedIdentifier _ ident) -> staticEnvType env ident
   AS.ExprIf ((_, body) : rest) fin ->
     case exprToStaticType env body of
@@ -213,8 +212,8 @@ staticBinOp bop msv msv' = do
   let resultB primop = return $ StaticBool $ primop i i'
   let divI =
         let
-          (quot, rem) = (i `divMod` i')
-        in if rem == 0 then return $ StaticInt quot
+          (quotient, remainder) = (i `divMod` i')
+        in if remainder == 0 then return $ StaticInt quotient
         else fail ""
   case bop of
       AS.BinOpAdd -> resultI (+)
@@ -263,7 +262,7 @@ exprToStatic :: StaticEnv env
              => env
              -> AS.Expr
              -> Maybe StaticValue
-exprToStatic env e = case e of
+exprToStatic env expr = case expr of
   AS.ExprIf ((test, body) : rest) fin -> do
     exprToStatic env test >>= \case
       StaticBool True -> exprToStatic env body
@@ -277,7 +276,7 @@ exprToStatic env e = case e of
     return $ StaticBool $ matchMask bv' mask
   AS.ExprVarRef (AS.QualifiedIdentifier _ "TRUE") -> Just $ StaticBool True
   AS.ExprVarRef (AS.QualifiedIdentifier _ "FALSE") -> Just $ StaticBool False
-  AS.ExprVarRef (AS.QualifiedIdentifier q id) -> staticEnvValue env id
+  AS.ExprVarRef (AS.QualifiedIdentifier _ ident) -> staticEnvValue env ident
   AS.ExprBinOp bop e' e'' ->
     staticBinOp bop (exprToStatic env e') (exprToStatic env e'')
   AS.ExprUnOp AS.UnOpNot e' -> do
@@ -436,9 +435,8 @@ assertExpr positive expr = case expr of
   AS.ExprBinOp AS.BinOpLogicalOr e1 e2 -> assertExpr positive $
     AS.ExprUnOp AS.UnOpNot (AS.ExprBinOp AS.BinOpLogicalAnd (AS.ExprUnOp AS.UnOpNot e1) (AS.ExprUnOp AS.UnOpNot e2))
   AS.ExprInSet e' setElts -> maybeEnv $ do
-    elt <- liftList $ setElts
-    case elt of
-      AS.SetEltSingle e'' -> assertExpr positive (AS.ExprBinOp AS.BinOpEQ e' e'')
+    AS.SetEltSingle e'' <- liftList $ setElts
+    assertExpr positive (AS.ExprBinOp AS.BinOpEQ e' e'')
   _ -> return ()
 
 testExpr :: AS.Expr -> StaticEnvM Bool
@@ -460,12 +458,12 @@ exprToStaticM expr = do
     _ -> case expr of
       AS.ExprVarRef (AS.VarName nm) -> possibleValuesFor nm
       -- Don't speculate across concats, this quickly causes a state explosion
-      AS.ExprBinOp AS.BinOpConcat e1 e2 -> fail ""
+      AS.ExprBinOp AS.BinOpConcat _ _ -> fail ""
       AS.ExprBinOp bop e1 e2 -> do
         sv1 <- exprToStaticM e1
         sv2 <- exprToStaticM e2
         liftMaybe $ staticBinOp bop (Just sv1) (Just sv2)
-      AS.ExprIf tests@((test, body) : rest) fin -> do
+      AS.ExprIf ((test, body) : rest) fin -> do
         testExpr test >>= \case
           True -> exprToStaticM body
           False -> exprToStaticM (AS.ExprIf rest fin)
@@ -482,11 +480,6 @@ allPossibleBVs n = do
   bit <- [True, False]
   bits <- allPossibleBVs (n - 1)
   return $ bit : bits
-
--- | Set a cap on the branching factor of a given nondeterministic operation
-nondetMaxBranch :: Integer -> StaticEnvM a -> StaticEnvM a
-nondetMaxBranch cut (StaticEnvM f) =
-  StaticEnvM (\env -> let result = f env in if length result > fromIntegral cut then [] else result)
 
 -- | Get all possible variable assignments for the given variables after
 -- the provided set of statements has been evaluated
@@ -519,7 +512,7 @@ stmtToStaticM s = case s of
 
   AS.StmtAssert e -> assertExpr True e
 
-  AS.StmtIf tests@((test, body) : rest) fin -> applyTests tests fin
+  AS.StmtIf tests fin -> applyTests tests fin
 
   AS.StmtAssign (AS.LValVarRef (AS.VarName nm)) e -> maybeEnv $ do
     sv <- exprToStaticM e
@@ -534,12 +527,12 @@ stmtToStaticM s = case s of
     in applyTests tests fin
   _ -> return ()
   where
-    applyTests tests fin = case tests of
+    applyTests tests mfin = case tests of
       (test, body) : rest -> do    
         testExpr test >>= \case
           True -> stmtsToStaticM body
-          False -> applyTests rest fin
-      _ -> case fin of
+          False -> applyTests rest mfin
+      _ -> case mfin of
         Just fin -> stmtsToStaticM fin
         _ -> return ()
 
@@ -550,6 +543,7 @@ stmtToStaticM s = case s of
         in ((test, stmts) : tests, fin)
       [AS.CaseOtherwise stmts] -> ([], Just stmts)
       [] -> ([], Nothing)
+      _ -> error $ "Unexpected case format: " ++ show e
 
     patToExpr e pat = case pat of
       AS.CasePatternInt i -> AS.ExprBinOp AS.BinOpEQ e (AS.ExprLitInt i)

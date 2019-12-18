@@ -52,7 +52,6 @@ module SemMC.ASL.SyntaxTraverse
 where
 
 import           Data.Typeable
-import qualified Control.Exception as X
 import           Control.Applicative
 import qualified Control.Monad.Writer.Lazy as W
 import           Control.Monad.Identity
@@ -62,12 +61,10 @@ import qualified Control.Monad.Reader as R
 import qualified Control.Monad.RWS as RWS
 import qualified Language.ASL.Syntax as AS
 import qualified Data.Text as T
-import qualified Data.List as List
-import           Data.List (nub)
 import qualified Data.Set as Set
 import qualified Data.Map as Map
 import qualified Control.Monad.State as MSS
-import           Data.Maybe (maybeToList, catMaybes, fromMaybe, listToMaybe, isJust, mapMaybe)
+import           Data.Maybe (maybeToList, catMaybes, isJust)
 import           SemMC.ASL.Types
 import           Data.Parameterized.Classes
 
@@ -135,15 +132,6 @@ applySyntaxOverridesInstrs f instrs =
 
   in mapInstr <$> instrs
 
-
-prepASL :: ([AS.Instruction], [AS.Definition]) -> ([AS.Instruction], [AS.Definition])
-prepASL (instrs, defs) =
-  let
-    ovrs :: SyntaxMap
-    ovrs = mkSyntaxOverrides defs
-  in (applySyntaxOverridesInstrs ovrs instrs, applySyntaxOverridesDefs ovrs defs)
-
-
 data InternalOverride = InternalOverride
   { iovGetters :: Set.Set T.Text
   , iovSetters :: Set.Set T.Text
@@ -153,13 +141,13 @@ emptyInternalOverride :: InternalOverride
 emptyInternalOverride = InternalOverride Set.empty Set.empty
 
 exprToLVal :: AS.Expr -> AS.LValExpr
-exprToLVal e = case e of
+exprToLVal expr = case expr of
   AS.ExprVarRef qident -> AS.LValVarRef qident
   AS.ExprIndex e slices -> AS.LValArrayIndex (exprToLVal e) slices
   AS.ExprSlice e slices -> AS.LValSliceOf (exprToLVal e) slices
   AS.ExprMembers e [mem] -> AS.LValMember (exprToLVal e) mem
   AS.ExprTuple es -> AS.LValTuple (map exprToLVal es)
-  _ -> error $ "Invalid inline for expr:" <> show e
+  _ -> error $ "Invalid inline for expr:" <> show expr
 
 mkSyntaxOverrides :: [AS.Definition] -> SyntaxMap
 mkSyntaxOverrides defs =
@@ -213,9 +201,9 @@ mkSyntaxOverrides defs =
             let vars = take (length lvs') $
                   map (\i -> "__tupleResult" <> T.pack (show i)) ([0..] :: [Integer])
             let mkVar nm = AS.QualifiedIdentifier AS.ArchQualAny nm
-            let getlv (i, (mlv', lv)) = case mlv' of
-                  Just lv' -> AS.LValVarRef (mkVar $ vars !! i)
-                  _ -> lv
+            let getlv (i, (mlv', lv')) = case mlv' of
+                  Just _ -> AS.LValVarRef (mkVar $ vars !! i)
+                  _ -> lv'
             let tuple = map getlv (zip [0..] (zip lvs' lvs))
             let asnResult (i, mlv') = case mlv' of
                   Just lv' -> Just $ lv' (AS.ExprVarRef $ mkVar $ vars !! i)
@@ -295,7 +283,7 @@ mkSyntaxOverrides defs =
 
       varSynonyms = catMaybes $ varSyn <$> defs
       varSyn d = case d of
-        AS.DefConst id _ e -> Just (id, e)
+        AS.DefConst ident _ e -> Just (ident, e)
         _ -> Nothing
 
       varSynMap = Map.fromList varSynonyms
@@ -353,7 +341,7 @@ unindentLog :: MonadLog m => m a -> m a
 unindentLog m = logIndent (\_ -> 0) >> m
 
 newtype MonadLogT (m :: * -> *) a =
-  MonadLogT { unMonadLogT :: MSS.StateT (Integer, Integer) (W.WriterT [T.Text] m) a }
+  MonadLogT { _unMonadLogT :: MSS.StateT (Integer, Integer) (W.WriterT [T.Text] m) a }
   deriving (Functor, Applicative, Monad)
 
 instance MT.MonadTrans MonadLogT where
@@ -476,14 +464,14 @@ collectSyntax writes e = W.execWriterT (traverseSyntax (writeToTraverser writes)
       liftWrite syntaxWrite
       where
         liftWrite :: forall t. KnownSyntaxRepr t => (t -> m w) -> t -> W.WriterT w m t
-        liftWrite f e = MT.lift (f e) >>= (\w -> W.tell w >> return e)
+        liftWrite f e' = MT.lift (f e') >>= (\w -> W.tell w >> return e')
 
 -- | Recursive syntax mapping. The given map is applied top-down to each sub-element.
 mapSyntax :: KnownSyntaxRepr t => SyntaxMap -> t -> t
 mapSyntax smap t = runIdentity $ traverseSyntax (mapsToTraverser smap) t
   where
     mapsToTraverser :: SyntaxMap -> SyntaxTraverser Identity
-    mapsToTraverser syntaxMap = (\t -> return $ syntaxMap t)
+    mapsToTraverser syntaxMap = (\t' -> return $ syntaxMap t')
 
 -- | Recursive syntax traversal. Each sub-element is replaced by the result of the given monadic function.
 traverseSyntax :: MonadLog m => KnownSyntaxRepr t => SyntaxTraverser m -> t -> m t
@@ -604,7 +592,7 @@ traverseType tr t =
     AS.TypeFun i e -> (\e' -> AS.TypeFun i e') <$> f e
     AS.TypeOf e -> AS.TypeOf <$> f e
     AS.TypeReg i fs -> (\fs' -> AS.TypeReg i fs') <$> traverse foldField fs
-    AS.TypeArray t ixt -> liftA2 AS.TypeArray (f t) (foldIxType ixt)
+    AS.TypeArray ty ixt -> liftA2 AS.TypeArray (f ty) (foldIxType ixt)
     _ -> return t'
 
 traverseStmt :: forall m. MonadLog m => SyntaxTraverser m -> AS.Stmt -> m AS.Stmt
@@ -651,52 +639,6 @@ traverseStmt tr stmt =
       (indentLog $ traverse foldCatches alts)
     _ -> return stmt'
 
-withStar :: String -> String
-withStar (' ' : rest) = '*' : rest
-withStar s = s
-
-atDepth :: Int -> String -> String
-atDepth depth s = concat (replicate depth " ") ++ s
-
-withLines :: [String] -> String
-withLines strs = List.intercalate "\n" strs
-
-showExt :: Show t => t -> String
-showExt ext = case show ext of
-  "" -> ""
-  s -> ">>>" ++ s ++ "\n"
-
-prettyToplevelStmt :: Show t => (AS.Stmt, t) -> String
-prettyToplevelStmt (stmt, ext) = showExt ext ++ withStar (prettyStmt 3 stmt)
-
-prettyToplevelExpr :: Show t => (AS.Expr, t) -> String
-prettyToplevelExpr (expr, ext) = showExt ext ++ "*  " ++ prettyExpr expr
-
-prettyToplevelCall :: Show t => ((AS.QualifiedIdentifier, [AS.Expr]), t) -> String
-prettyToplevelCall (call, ext) = showExt ext ++ "*  " ++ prettyCall call
-
-prettyCall :: (AS.QualifiedIdentifier, [AS.Expr]) -> String
-prettyCall call = show call
-
-prettyStmt :: Int -> AS.Stmt -> String
-prettyStmt depth stmt = case stmt of
-  AS.StmtIf tests melse ->
-    atDepth depth "StmtIf: " ++
-    unlines (map (\(test, stmts) ->
-           prettyExpr test ++ "\n"
-           ++ withLines (map (prettyStmt $ depth + 1) stmts)) tests)
-    ++
-    case melse of
-      Just stmts -> (atDepth depth "Else\n") ++ withLines (map (prettyStmt $ depth + 1) stmts)
-      Nothing -> ""
-  AS.StmtFor var range stmts ->
-    atDepth depth "StmtFor: " ++ show var ++ show range ++ "\n"
-      ++ withLines (map (prettyStmt $ depth + 1) stmts)
-  AS.StmtRepeat stmts test ->
-    atDepth depth "StmtRepeat: " ++ prettyExpr test ++ "\n"
-    ++ withLines (map (prettyStmt $ depth + 1) stmts)
-  _ -> atDepth depth $ show stmt
-
 prettyShallowStmt :: AS.Stmt -> T.Text
 prettyShallowStmt stmt = case stmt of
   AS.StmtIf _ _ -> "StmtIf: "
@@ -705,8 +647,6 @@ prettyShallowStmt stmt = case stmt of
   AS.StmtWhile _ _ -> "StmtWhile: "
   _ -> T.pack $ show stmt
 
-prettyExpr :: AS.Expr -> String
-prettyExpr expr = show expr
 
 prettyShallowExpr :: AS.Expr -> T.Text
 prettyShallowExpr expr = case expr of

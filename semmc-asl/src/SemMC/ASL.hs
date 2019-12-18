@@ -21,42 +21,26 @@ module SemMC.ASL (
   , SimulationException(..)
   ) where
 
-import           Data.Proxy
-import           GHC.TypeLits ( Symbol )
-import qualified Data.Type.List as TL
 import           Data.IORef
 import qualified Control.Exception as X
 import           Control.Lens ( (^.) )
-import           Data.Monoid
-import qualified Control.Monad.State.Class as MS
-import qualified Control.Monad.State as MS
-import           Control.Applicative ( (<|>) )
-import           Control.Monad.IO.Class
-import           Control.Monad.Identity
-import           Control.Monad.ST ( RealWorld )
-import           Data.Set ( Set )
-import qualified Data.Set as Set
-import           Data.Map ( Map )
+-- import           Control.Applicative ( (<|>) )
+
 import qualified Data.Map as Map
 import           Data.Time.Clock
-import           Data.Parameterized.Pair ( Pair(..) )
+-- import           Data.Parameterized.Pair ( Pair(..) )
 import           Data.Parameterized.NatRepr
-import           Data.Parameterized.Classes
-import           Data.Parameterized.Ctx ( type (<+>) )
-import           Data.Parameterized.Context ( (<++>) )
+-- import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
-import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.List as PL
+-- import qualified Data.Parameterized.List as PL
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableFC as FC
 import qualified Data.Text as T
-import qualified Data.Type.List as TL
-import           Data.Maybe ( fromMaybe, catMaybes, maybeToList, mapMaybe )
+-- import           Data.Maybe ( fromMaybe )
 -- import qualified Dismantle.XML.AArch32 as DA
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CCC
 import qualified Lang.Crucible.CFG.Expr as CCE
-import qualified Lang.Crucible.CFG.Generator as CCG
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.CallFrame as CSC
@@ -71,21 +55,19 @@ import qualified What4.Interface as WI
 import qualified What4.Symbol as WS
 import qualified What4.Protocol.Online as WPO
 
-import qualified What4.Interface as S
 import qualified What4.Expr as S
-import qualified What4.Expr.Builder as S
 
-import qualified SemMC.Formula as SF
+-- import qualified SemMC.Formula as SF
 import qualified SemMC.ASL.Crucible as AC
 import qualified SemMC.ASL.Signature as AS
 import qualified SemMC.ASL.Types as AT
 import qualified SemMC.ASL.Extension as AE
 
-import           SemMC.Architecture.ARM.Location ( A32, T32 )
-import qualified SemMC.Architecture.ARM.Location as AL
-import qualified SemMC.Architecture.Location as L
-import qualified SemMC.Architecture as A
-import qualified SemMC.BoundVar as BV
+-- import           SemMC.Architecture.ARM.Location ( A32 )
+-- import qualified SemMC.Architecture.ARM.Location as AL
+-- import qualified SemMC.Architecture.Location as L
+-- import qualified SemMC.Architecture as A
+-- import qualified SemMC.BoundVar as BV
 
 
 data SimulatorConfig scope =
@@ -95,10 +77,6 @@ data SimulatorConfig scope =
                   }
 
 type OnlineSolver scope sym = sym ~ CBO.YicesOnlineBackend scope (S.Flags S.FloatReal)
-
-reshape :: Ctx.Assignment CT.BaseTypeRepr btps -> PL.List WT.BaseTypeRepr (AT.CtxToList btps)
-reshape Ctx.Empty = PL.Nil
-reshape (reprs Ctx.:> brepr) = brepr PL.:< reshape reprs
 
 freshRegEntries :: Ctx.Assignment (FreshArg sym) btps -> Ctx.Assignment (CS.RegEntry sym) (AT.ToCrucTypes btps)
 freshRegEntries Ctx.Empty = Ctx.Empty
@@ -128,11 +106,11 @@ genSimulation symCfg crucFunc extractResult =
       let globalReads = AC.funcGlobalReads crucFunc
       let globalReadReprs = FC.fmapFC AT.projectValue (AS.funcGlobalReadReprs sig)
       let globalReadStructRepr = WT.BaseStructRepr globalReadReprs
-      FreshArg _ gbv _ _ <- allocateFreshArg sym (AC.LabeledValue "globalReads" globalReadStructRepr)
+      FreshArg _ gbv <- allocateFreshArg sym (AC.LabeledValue "globalReads" globalReadStructRepr)
       let globalStruct = WI.varExpr sym gbv
       globals <- Ctx.traverseWithIndex (\idx _ -> WI.structField sym globalStruct idx) globalReadReprs
       let globalState = initGlobals symCfg globals globalReads
-      (s0, funsref) <- initialSimulatorState symCfg globalState econt retRepr
+      (s0, _) <- initialSimulatorState symCfg globalState econt retRepr
       ft <- executionFeatures (AS.funcName $ AC.funcSig crucFunc) (simSym symCfg)
       p <- CBO.getSolverProcess sym
       let argBVs = FC.fmapFC freshArgBoundVar initArgs
@@ -141,14 +119,14 @@ genSimulation symCfg crucFunc extractResult =
         CS.executeCrucible ft s0
       case eres of
         CS.TimeoutResult {} -> X.throwIO (SimulationTimeout (Some (AC.SomeFunctionSignature sig)))
-        CS.AbortedResult context ab -> X.throwIO $ SimulationAbort (Some (AC.SomeFunctionSignature sig)) (showAbortedResult ab)
+        CS.AbortedResult _ ab -> X.throwIO $ SimulationAbort (Some (AC.SomeFunctionSignature sig)) (showAbortedResult ab)
         CS.FinishedResult _ pres -> do
           gp <- case pres of
             CS.TotalRes gp -> return gp
             CS.PartialRes _ _ gp _ -> return gp
           extractResult (gp ^. CS.gpValue) argBVs gbv
   where
-    getBVs ctx = FC.toListFC (\(FreshArg _ bv _ _) -> Some bv) ctx
+    getBVs ctx = FC.toListFC (\(FreshArg _ bv) -> Some bv) ctx
 
 -- | Simulate a function
 --
@@ -187,7 +165,6 @@ simulateFunction symCfg crucFunc = genSimulation symCfg crucFunc extractResult
                 (const False )
               return $ fn
           | otherwise -> X.throwIO (UnexpectedReturnType btr)
-
 
 -- simulateInstruction :: forall sym init globalReads globalWrites tps scope
 --                      . (CB.IsSymInterface sym, OnlineSolver scope sym)
@@ -355,140 +332,132 @@ simulateFunction symCfg crucFunc = genSimulation symCfg crucFunc extractResult
 --                        , retValueCount = retVal + 1}
 --              | otherwise -> error $ "Expected register type:" ++ show regType ++ " " ++ show bt
 
--- | Mapping from ASL globals to their ISA location
-globalToA32Location :: T.Text -> Maybe (Pair (L.Location A32) CT.BaseTypeRepr)
-globalToA32Location globName = case globName of
-  "_PC" -> Just $ Pair AL.LocPC (CT.BaseBVRepr knownNat)
-  "__Memory" -> Just $ Pair AL.LocMem knownRepr
-  "PSTATE_N" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_N) (CT.BaseBVRepr knownNat)
-  "PSTATE_Z" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_Z) (CT.BaseBVRepr knownNat)
-  "PSTATE_C" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_C) (CT.BaseBVRepr knownNat)
-  "PSTATE_V" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_V) (CT.BaseBVRepr knownNat)
-  "PSTATE_D" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_D) (CT.BaseBVRepr knownNat)
-  "PSTATE_A" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_A) (CT.BaseBVRepr knownNat)
-  "PSTATE_I" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_I) (CT.BaseBVRepr knownNat)
-  "PSTATE_F" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_F) (CT.BaseBVRepr knownNat)
-  "PSTATE_PAN" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_PAN) (CT.BaseBVRepr knownNat)
-  "PSTATE_UAO" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_UAO) (CT.BaseBVRepr knownNat)
-  "PSTATE_DIT" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_DIT) (CT.BaseBVRepr knownNat)
-  "PSTATE_TCO" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_TCO) (CT.BaseBVRepr knownNat)
-  "PSTATE_BTYPE" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_BTYPE) (CT.BaseBVRepr knownNat)
-  "PSTATE_SS" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_SS) (CT.BaseBVRepr knownNat)
-  "PSTATE_IL" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_IL) (CT.BaseBVRepr knownNat)
-  "PSTATE_EL" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_EL) (CT.BaseBVRepr knownNat)
-  "PSTATE_nRW" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_nRW) (CT.BaseBVRepr knownNat)
-  "PSTATE_SP" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_SP) (CT.BaseBVRepr knownNat)
-  "PSTATE_Q" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_Q) (CT.BaseBVRepr knownNat)
-  "PSTATE_GE" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_GE) (CT.BaseBVRepr knownNat)
-  "PSTATE_SSBS" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_SSBS) (CT.BaseBVRepr knownNat)
-  "PSTATE_IT" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_IT) (CT.BaseBVRepr knownNat)
-  "PSTATE_J" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_J) (CT.BaseBVRepr knownNat)
-  "PSTATE_T" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_T) (CT.BaseBVRepr knownNat)
-  "PSTATE_E" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_E) (CT.BaseBVRepr knownNat)
-  "PSTATE_M" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_M) (CT.BaseBVRepr knownNat)
-  _ -> Nothing
+-- -- | Mapping from ASL globals to their ISA location
+-- globalToA32Location :: T.Text -> Maybe (Pair (L.Location A32) CT.BaseTypeRepr)
+-- globalToA32Location globName = case globName of
+--   "_PC" -> Just $ Pair AL.LocPC (CT.BaseBVRepr knownNat)
+--   "__Memory" -> Just $ Pair AL.LocMem knownRepr
+--   "PSTATE_N" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_N) (CT.BaseBVRepr knownNat)
+--   "PSTATE_Z" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_Z) (CT.BaseBVRepr knownNat)
+--   "PSTATE_C" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_C) (CT.BaseBVRepr knownNat)
+--   "PSTATE_V" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_V) (CT.BaseBVRepr knownNat)
+--   "PSTATE_D" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_D) (CT.BaseBVRepr knownNat)
+--   "PSTATE_A" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_A) (CT.BaseBVRepr knownNat)
+--   "PSTATE_I" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_I) (CT.BaseBVRepr knownNat)
+--   "PSTATE_F" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_F) (CT.BaseBVRepr knownNat)
+--   "PSTATE_PAN" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_PAN) (CT.BaseBVRepr knownNat)
+--   "PSTATE_UAO" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_UAO) (CT.BaseBVRepr knownNat)
+--   "PSTATE_DIT" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_DIT) (CT.BaseBVRepr knownNat)
+--   "PSTATE_TCO" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_TCO) (CT.BaseBVRepr knownNat)
+--   "PSTATE_BTYPE" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_BTYPE) (CT.BaseBVRepr knownNat)
+--   "PSTATE_SS" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_SS) (CT.BaseBVRepr knownNat)
+--   "PSTATE_IL" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_IL) (CT.BaseBVRepr knownNat)
+--   "PSTATE_EL" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_EL) (CT.BaseBVRepr knownNat)
+--   "PSTATE_nRW" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_nRW) (CT.BaseBVRepr knownNat)
+--   "PSTATE_SP" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_SP) (CT.BaseBVRepr knownNat)
+--   "PSTATE_Q" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_Q) (CT.BaseBVRepr knownNat)
+--   "PSTATE_GE" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_GE) (CT.BaseBVRepr knownNat)
+--   "PSTATE_SSBS" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_SSBS) (CT.BaseBVRepr knownNat)
+--   "PSTATE_IT" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_IT) (CT.BaseBVRepr knownNat)
+--   "PSTATE_J" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_J) (CT.BaseBVRepr knownNat)
+--   "PSTATE_T" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_T) (CT.BaseBVRepr knownNat)
+--   "PSTATE_E" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_E) (CT.BaseBVRepr knownNat)
+--   "PSTATE_M" -> Just $ Pair (AL.LocPSTATE AL.PSTATE_M) (CT.BaseBVRepr knownNat)
+--   _ -> Nothing
 
 
-mkFreshArgMap :: Ctx.Assignment (FreshArg sym) tps -> Map.Map T.Text (Some (FreshArg sym))
-mkFreshArgMap = FC.foldrFC' (\fa -> Map.insert (freshArgName fa) (Some fa)) Map.empty
+-- mkFreshArgMap :: Ctx.Assignment (FreshArg sym) tps -> Map.Map T.Text (Some (FreshArg sym))
+-- mkFreshArgMap = FC.foldrFC' (\fa -> Map.insert (freshArgName fa) (Some fa)) Map.empty
 
-data BVTypeProof n where
-  BVTypeProof :: A.OperandType A32 s :~: CT.BaseBVType n -> CT.SymbolRepr s -> BVTypeProof n
+-- data BVTypeProof n where
+--   BVTypeProof :: A.OperandType A32 s :~: CT.BaseBVType n -> CT.SymbolRepr s -> BVTypeProof n
 
--- | Clumsily reversing the symbol mapping
+-- -- | Clumsily reversing the symbol mapping
 
-getRetRepr :: forall n. 1 WT.<= n => WT.NatRepr n -> BVTypeProof n
-getRetRepr n =
-   fromMaybe (error $ "bad bv" ++ show n) $
-   testEq @"Bv1" knownRepr
-   <|> testEq @"Bv2" knownRepr
-   <|> testEq @"Bv3" knownRepr
-   <|> testEq @"Bv4" knownRepr
-   <|> testEq @"Bv5" knownRepr
-   <|> testEq @"Bv6" knownRepr
-   <|> testEq @"Bv7" knownRepr
-   <|> testEq @"Bv8" knownRepr
-   <|> testEq @"Bv9" knownRepr
-   <|> testEq @"Bv10" knownRepr
-   <|> testEq @"Bv11" knownRepr
-   <|> testEq @"Bv12" knownRepr
-   <|> testEq @"Bv13" knownRepr
-   <|> testEq @"Bv14" knownRepr
-   <|> testEq @"Bv15" knownRepr
-   <|> testEq @"Bv16" knownRepr
-   <|> testEq @"Bv17" knownRepr
-   <|> testEq @"Bv18" knownRepr
-   <|> testEq @"Bv19" knownRepr
-   <|> testEq @"Bv20" knownRepr
-   <|> testEq @"Bv21" knownRepr
-   <|> testEq @"Bv22" knownRepr
-   <|> testEq @"Bv23" knownRepr
-   <|> testEq @"Bv24" knownRepr
-  where
-    testEq :: forall s. CT.KnownSymbol s => CT.BaseTypeRepr (A.OperandType A32 s) -> Maybe (BVTypeProof n)
-    testEq btrepr =
-      let
-        srepr = CT.knownSymbol :: CT.SymbolRepr s
-      in case testEquality btrepr (CT.BaseBVRepr n) of
-      Just Refl -> Just $ BVTypeProof Refl srepr
-      Nothing -> Nothing
+-- getRetRepr :: forall n. 1 WT.<= n => WT.NatRepr n -> BVTypeProof n
+-- getRetRepr n =
+--    fromMaybe (error $ "bad bv" ++ show n) $
+--    testEq @"Bv1" knownRepr
+--    <|> testEq @"Bv2" knownRepr
+--    <|> testEq @"Bv3" knownRepr
+--    <|> testEq @"Bv4" knownRepr
+--    <|> testEq @"Bv5" knownRepr
+--    <|> testEq @"Bv6" knownRepr
+--    <|> testEq @"Bv7" knownRepr
+--    <|> testEq @"Bv8" knownRepr
+--    <|> testEq @"Bv9" knownRepr
+--    <|> testEq @"Bv10" knownRepr
+--    <|> testEq @"Bv11" knownRepr
+--    <|> testEq @"Bv12" knownRepr
+--    <|> testEq @"Bv13" knownRepr
+--    <|> testEq @"Bv14" knownRepr
+--    <|> testEq @"Bv15" knownRepr
+--    <|> testEq @"Bv16" knownRepr
+--    <|> testEq @"Bv17" knownRepr
+--    <|> testEq @"Bv18" knownRepr
+--    <|> testEq @"Bv19" knownRepr
+--    <|> testEq @"Bv20" knownRepr
+--    <|> testEq @"Bv21" knownRepr
+--    <|> testEq @"Bv22" knownRepr
+--    <|> testEq @"Bv23" knownRepr
+--    <|> testEq @"Bv24" knownRepr
+--   where
+--     testEq :: forall s. CT.KnownSymbol s => CT.BaseTypeRepr (A.OperandType A32 s) -> Maybe (BVTypeProof n)
+--     testEq btrepr =
+--       let
+--         srepr = CT.knownSymbol :: CT.SymbolRepr s
+--       in case testEquality btrepr (CT.BaseBVRepr n) of
+--       Just Refl -> Just $ BVTypeProof Refl srepr
+--       Nothing -> Nothing
 
-symbolIndex :: CT.SymbolRepr s -> PL.Index (s ': sh) s
-symbolIndex repr = PL.IndexHere
+-- symbolIndex :: CT.SymbolRepr s -> PL.Index (s ': sh) s
+-- symbolIndex _ = PL.IndexHere
 
-registerRetRepr :: CT.BaseTypeRepr (A.OperandType A32 "R")
-registerRetRepr = knownRepr
+-- registerRetRepr :: CT.BaseTypeRepr (A.OperandType A32 "R")
+-- registerRetRepr = knownRepr
 
 
-addParamExpr :: ParamExpr arch (s ': sh) sym
-             -> [ParamExpr arch sh sym]
-             -> [ParamExpr arch (s ': sh) sym]
-addParamExpr pexpr l = pexpr : map (\(ParamExpr pf se) -> (ParamExpr (mapParam pf) se)) l
+-- addParamExpr :: ParamExpr arch (s ': sh) sym
+--              -> [ParamExpr arch sh sym]
+--              -> [ParamExpr arch (s ': sh) sym]
+-- addParamExpr pexpr l = pexpr : map (\(ParamExpr pf se) -> (ParamExpr (mapParam pf) se)) l
 
--- | Lift a Parameter to one more argument
-mapParam :: forall arch sh tp s. SF.Parameter arch sh tp -> SF.Parameter arch (s ': sh) tp
-mapParam p = case p of
-  SF.OperandParameter repr idx -> SF.OperandParameter repr (PL.IndexThere idx)
-  SF.LiteralParameter loc -> SF.LiteralParameter loc
-  SF.FunctionParameter _ _ _  -> error "Unsupported parameter type"
+-- -- | Lift a Parameter to one more argument
+-- mapParam :: forall arch sh tp s. SF.Parameter arch sh tp -> SF.Parameter arch (s ': sh) tp
+-- mapParam p = case p of
+--   SF.OperandParameter repr idx -> SF.OperandParameter repr (PL.IndexThere idx)
+--   SF.LiteralParameter loc -> SF.LiteralParameter loc
+--   SF.FunctionParameter _ _ _  -> error "Unsupported parameter type"
 
-data ParamExpr arch sh sym where
-  ParamExpr :: SF.Parameter arch sh tp -> Maybe (S.SymExpr sym tp) -> ParamExpr arch sh sym
+-- data ParamExpr arch sh sym where
+--   ParamExpr :: SF.Parameter arch sh tp -> Maybe (S.SymExpr sym tp) -> ParamExpr arch sh sym
 
-data OperandCollector' sym arch sh s = OperandCollector' { opC :: OperandCollector sym arch (s ': sh) }
+-- newtype OperandCollector' sym arch sh s = OperandCollector' { _opC :: OperandCollector sym arch (s ': sh) }
 
-toOperandCollector :: OperandCollector' sym arch sh s -> Some (OperandCollector sym arch)
-toOperandCollector (OperandCollector' opcol) = Some opcol
+-- toOperandCollector :: OperandCollector' sym arch sh s -> Some (OperandCollector sym arch)
+-- toOperandCollector (OperandCollector' opcol) = Some opcol
 
-emptyOperandCollector :: OperandCollector sym arch '[]
-emptyOperandCollector = OperandCollector [] PL.Nil PL.Nil 0
+-- emptyOperandCollector :: OperandCollector sym arch '[]
+-- emptyOperandCollector = OperandCollector [] PL.Nil PL.Nil 0
 
-data OperandCollector sym arch sh = OperandCollector
-  { opParams :: [ParamExpr arch sh sym]
-  , opBVs :: PL.List (BV.BoundVar sym arch) sh
-  , opParamRepr :: PL.List CT.SymbolRepr sh
-  , retValueCount :: Int -- number of written-to register operands we've collected
-  }
+-- data OperandCollector sym arch sh = OperandCollector
+--   { opParams :: [ParamExpr arch sh sym]
+--   , opBVs :: PL.List (BV.BoundVar sym arch) sh
+--   , opParamRepr :: PL.List CT.SymbolRepr sh
+--   , retValueCount :: Int -- number of written-to register operands we've collected
+--   }
 
-data LocExpr sym arch where
-  LocExpr :: CT.BaseTypeRepr tp -> L.Location arch tp -> S.BoundVar sym tp -> Maybe (S.SymExpr sym tp) -> LocExpr sym arch
+-- data LocExpr sym arch where
+--   LocExpr :: CT.BaseTypeRepr tp -> L.Location arch tp -> S.BoundVar sym tp -> Maybe (S.SymExpr sym tp) -> LocExpr sym arch
 
 data FreshArg sym bt = FreshArg { freshArgEntry :: CS.RegEntry sym (CT.BaseToType bt)
                                 , freshArgBoundVar :: WI.BoundVar sym bt
-                                , freshArgRepr :: CT.BaseTypeRepr bt
-                                , freshArgName :: T.Text
                                 }
 
 type family ToCrucTypes (wtps :: CT.Ctx WT.BaseType) :: CT.Ctx CT.CrucibleType where
   ToCrucTypes CT.EmptyCtx = CT.EmptyCtx
   ToCrucTypes (wtps CT.::> wtp) = ToCrucTypes wtps CT.::> CT.BaseToType wtp
 
-freshArgBoundVars :: Ctx.Assignment (FreshArg sym) init -> Ctx.Assignment (WI.BoundVar sym) (TL.ToContextFwd (AT.CtxToList init))
-freshArgBoundVars args = TL.toAssignmentFwd (freshArgBoundVars' args)
-
-freshArgBoundVars' :: Ctx.Assignment (FreshArg sym) init -> PL.List (WI.BoundVar sym) (AT.CtxToList init)
-freshArgBoundVars' Ctx.Empty = PL.Nil
-freshArgBoundVars' (args Ctx.:> arg) = freshArgBoundVar arg PL.:< freshArgBoundVars' args
 
 allocateFreshArg :: (CB.IsSymInterface sym, OnlineSolver scope sym)
                  => sym
@@ -504,8 +473,6 @@ allocateFreshArg sym (AC.LabeledValue name rep) = do
                       , CS.regValue = WI.varExpr sym bv
                       } )
         bv
-        rep
-        name
     CT.BaseIntegerRepr -> do
       sname <- toSolverSymbol (T.unpack name)
       bv <- WI.freshBoundVar sym sname WT.BaseIntegerRepr
@@ -514,8 +481,6 @@ allocateFreshArg sym (AC.LabeledValue name rep) = do
                       , CS.regValue = WI.varExpr sym bv
                       } )
         bv
-        rep
-        name
     CT.BaseBoolRepr -> do
       sname <- toSolverSymbol (T.unpack name)
       bv <- WI.freshBoundVar sym sname WT.BaseBoolRepr
@@ -524,8 +489,6 @@ allocateFreshArg sym (AC.LabeledValue name rep) = do
                       , CS.regValue = WI.varExpr sym bv
                       } )
         bv
-        rep
-        name
     CT.BaseArrayRepr idxTy vTy -> do
       sname <- toSolverSymbol (T.unpack name)
       bv <- WI.freshBoundVar sym sname (WT.BaseArrayRepr idxTy vTy)
@@ -534,8 +497,6 @@ allocateFreshArg sym (AC.LabeledValue name rep) = do
                       , CS.regValue = WI.varExpr sym bv
                       } )
         bv
-        rep
-        name
     CT.BaseStructRepr idxTy -> do
       sname <- toSolverSymbol (T.unpack name)
       bv <- WI.freshBoundVar sym sname (WT.BaseStructRepr idxTy)
@@ -544,8 +505,6 @@ allocateFreshArg sym (AC.LabeledValue name rep) = do
                       , CS.regValue = WI.varExpr sym bv
                       } )
         bv
-        rep
-        name
     _ -> X.throwIO (CannotAllocateFresh name rep)
 
 toSolverSymbol :: String -> IO WS.SolverSymbol
@@ -580,7 +539,7 @@ initGlobals :: forall sym env scope
             -> Ctx.Assignment (S.Expr scope) env
             -> Ctx.Assignment AC.BaseGlobalVar env
             -> CS.SymGlobalState sym
-initGlobals symCfg initGlobals globalVars = do
+initGlobals _ globalExprs globalVars = do
   Ctx.forIndex (Ctx.size globalVars) addGlobal CS.emptyGlobals
   where
     addGlobal :: forall bt
@@ -590,7 +549,7 @@ initGlobals symCfg initGlobals globalVars = do
     addGlobal gs idx =
       let
         AC.BaseGlobalVar gv = globalVars Ctx.! idx
-      in CSG.insertGlobal gv (initGlobals Ctx.! idx) gs
+      in CSG.insertGlobal gv (globalExprs Ctx.! idx) gs
 
 executionFeatures :: sym ~ CBO.OnlineBackend scope solver fs
                   => WPO.OnlineSolver scope solver
@@ -624,9 +583,9 @@ data SimulationException = SimulationTimeout (Some AC.SomeFunctionSignature)
 
 showAbortedResult :: CS.AbortedResult c d -> T.Text
 showAbortedResult ar = case ar of
-  CS.AbortedExec reason st -> T.pack $ show reason
+  CS.AbortedExec reason _ -> T.pack $ show reason
   CS.AbortedExit code -> T.pack $ show code
-  CS.AbortedBranch loc pre res' res'' -> "BRANCH: " <> showAbortedResult res' <> "\n" <> showAbortedResult res''
+  CS.AbortedBranch _ _ res' res'' -> "BRANCH: " <> showAbortedResult res' <> "\n" <> showAbortedResult res''
 
 deriving instance Show SimulationException
 
