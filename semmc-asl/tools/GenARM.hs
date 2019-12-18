@@ -30,9 +30,9 @@ import           Data.Map ( Map )
 import qualified Data.Map.Strict as Map
 import           Data.Set ( Set )
 import qualified Data.Set as Set
-import           Data.Proxy ( Proxy(..) )
 import           Data.Maybe ( fromMaybe, catMaybes, listToMaybe, mapMaybe )
 import           Text.Read (readMaybe)
+import           Data.Proxy
 import qualified Data.Parameterized.TraversableFC as FC
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
@@ -89,10 +89,16 @@ import qualified SemMC.ASL.Extension as AE
 import Control.Concurrent
 import Control.Concurrent.MVar
 
+import qualified What4.Expr as B
+import qualified What4.Expr.Builder as B
 import qualified What4.Interface as WI
 import qualified What4.Solver.Yices as Yices
 import qualified What4.Config as WC
 import           What4.ProblemFeatures
+
+import           What4.SatResult
+import qualified What4.Protocol.Online as WPO
+import qualified What4.Protocol.SMTWriter as WPS
 
 import qualified SemMC.ASL.SyntaxTraverse as ASLT
 
@@ -105,6 +111,7 @@ import qualified SemMC.Formula as FE
 
 import qualified What4.Serialize.Printer as WP
 import qualified What4.Serialize.Parser as WP
+import qualified What4.Serialize.Normalize as WN
 import qualified What4.Utils.Log as U
 import qualified What4.Utils.Util as U
 
@@ -488,42 +495,50 @@ maybeSimulateFunction fromInstr key deps mfunc = do
     (Just func, False) -> simulateFunction fromInstr key deps func
     _ -> return ()
 
-checkSymFnEquality :: CBO.YicesOnlineBackend scope (B.Flags B.FloatReal) ~ sym
-                 => sym
-                 -> WI.SymFn sym args tp
-                 -> WI.SymFn sym args' tp'
-                 -> IO (Maybe SimulationException)
-checkSymFnEquality sym fn1 fn2 =
-  let
-    argTypes1 = WI.fnArgTypes fn1
-    argTypes2 = WI.fnArgTypes fn2
-    retType1 = WI.fnReturnType fn1
-    retType2 = WI.fnReturnType fn2
-  in if | Just Refl <- testEquality argTypes1 argTypes2
-        , Just Refl <- testEquality retType1 retType2
-        , B.ExprSymFn _ _ (B.DefinedFnInfo argBVs1 efn1 _) _ <- fn1
-        , B.ExprSymFn _ _ (B.DefinedFnInfo argBVs2 efn2 _) _ <- fn2 -> do
-          args <- FC.traverseFC (\bv -> WI.freshConstant sym (B.bvarName bv) (B.bvarType bv)) argBVs1
-          expr1 <- B.evalBoundVars sym efn1 argBVs1 args
-          expr2 <- B.evalBoundVars sym efn2 argBVs2 args
-          case testEquality expr1 expr2 of
-            Just Refl -> return Nothing
-            Nothing ->
-              return $ Just $ SimulationDeserializationMismatch (show $ WI.printSymExpr expr1) (show $ WI.printSymExpr expr2)
-        | otherwise -> error "Unexpected function type"       
+data SimulationException where
+  SimulationDeserializationFailure :: String -> T.Text -> SimulationException
+  SimulationDeserializationMismatch :: forall t args args' ret ret'. T.Text -> (B.ExprSymFn t args ret) -> (B.ExprSymFn t args' ret') -> SimulationException
+  SimulationFailure :: SimulationException
 
-data SimulationException =
-    SimulationDeserializationFailure String T.Text
-  | SimulationDeserializationMismatch String String
-  | SimulationFailure
 instance Show SimulationException where
   show se = case se of
     SimulationDeserializationFailure err formula ->
       "SimulationDeserializationFailure:\n" ++ err ++ "\n" ++ T.unpack formula
-    SimulationDeserializationMismatch formula1 formula2 ->
-      "SimulationDeserializationMismatch:\nOriginal:\n" ++ formula1 ++ "\nDeserialized:\n" ++ formula2
+    SimulationDeserializationMismatch sexpr formula1 formula2 ->
+      "SimulationDeserializationMismatch:\n S-Expression:\n" ++ (T.unpack sexpr) ++ "\nOriginal Formula:\n" ++ (showSymFn formula1) ++ "\nDeserialized:\n" ++ (showSymFn formula2)
     SimulationFailure -> "SimulationFailure"
 instance X.Exception SimulationException
+
+showSymFn :: B.ExprSymFn t args ret -> String
+showSymFn fn = case B.symFnInfo fn of
+  B.DefinedFnInfo _ expr _ -> (show $ WI.printSymExpr expr)
+  _ -> ""
+
+mkParserConfig :: forall sym scope
+                . sym ~ CBO.YicesOnlineBackend scope (B.Flags B.FloatReal)
+               => sym
+               -> WP.SymFnEnv sym
+               -> WP.ParserConfig sym
+mkParserConfig sym fenv =
+  WP.ParserConfig { pSymFnEnv = fenv
+                  , pGlobalLookup = \_ -> return Nothing
+                  , pOverrides = \_ -> Nothing
+                  , pSym = sym
+                  }
+  where
+    rawIteOverride :: String -> Maybe ([Some (WI.SymExpr sym)] -> IO (Either String (Some (WI.SymExpr sym))))
+    rawIteOverride "ite" = Just $ \case
+      [Some test, Some then_, Some else_] -> case WI.exprType test of
+        WI.BaseBoolRepr ->
+          case testEquality (WI.exprType then_) (WI.exprType else_) of
+            Just Refl -> do
+              let repr = WI.exprType then_
+              let sz = 1 + B.iteSize then_ + B.iteSize else_
+              Right . Some <$> B.sbMakeExpr sym (B.BaseIte repr sz test then_ else_)
+            _ -> return $ Left "Parser override: ite: mismatch in branch types"
+        _ -> return $ Left "Parser override: ite: unexpected test type"
+      _ -> return $ Left "Parser override: ite: unexpected number of arguments"
+    rawIteOverride _ = Nothing
 
 
 -- | Simulate the given crucible CFG, and if it is a function add it to
@@ -555,19 +570,19 @@ simulateFunction fromInstr key deps p = do
         let (serializedSymFn, fenv) = WP.printSymFn' symFn
         lcfg <- U.mkLogCfg "check serialization"
         res <- U.withLogCfg lcfg $
-          WP.readSymFn backend fenv (\_ -> return Nothing) serializedSymFn
+          WP.readSymFn (mkParserConfig backend fenv) serializedSymFn
         case res of
           Left err -> do
             return $ Just $ SimulationDeserializationFailure err serializedSymFn
           Right (U.SomeSome symFn') -> do
             logMsgIO opts 1 $ "Serialization/Deserialization succeeded."
-            checkSymFnEquality backend symFn symFn' >>= \case
-              Nothing -> do
+            WN.testEquivSymFn backend symFn symFn' >>= \case
+              WN.ExprUnequal -> do
+                logMsgIO opts 1 $ "Mismatch in deserialized function."
+                return $ Just $ SimulationDeserializationMismatch serializedSymFn symFn symFn'
+              _ -> do
                 logMsgIO opts 1 $ "Deserialized function matches."
                 return Nothing
-              Just err -> do
-                logMsgIO opts 1 $ "Mismatch in deserialized function."
-                return $ Just err
         else return Nothing
       return $ (nm, symFn, ex)
   case mresult of

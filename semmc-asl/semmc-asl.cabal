@@ -64,7 +64,7 @@ executable semmc-asl-genarm
                        panic >= 0.3,
                        split
   hs-source-dirs:      tools
-  ghc-options:         -O2 -threaded -rtsopts -Wcompat -Wall
+  ghc-options:         -Wcompat -Wall
 
 test-suite semmc-asl-tests
   type: exitcode-stdio-1.0

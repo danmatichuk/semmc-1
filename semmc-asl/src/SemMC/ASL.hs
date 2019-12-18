@@ -16,7 +16,7 @@
 
 module SemMC.ASL (
     simulateFunction
-  , simulateInstruction
+  --, simulateInstruction
   , SimulatorConfig(..)
   , SimulationException(..)
   ) where
@@ -110,8 +110,8 @@ genSimulation :: forall arch sym init globalReads globalWrites tps scope a
               => SimulatorConfig scope
               -> AC.Function arch globalReads globalWrites init tps
               -> (CS.RegEntry sym (AS.FuncReturn globalWrites tps)
-                  -> Ctx.Assignment (FreshArg sym) init
-                  -> Ctx.Assignment (FreshArg sym) globalReads
+                  -> Ctx.Assignment (WI.BoundVar sym) init
+                  -> WI.BoundVar sym (WT.BaseStructType globalReads)
                   -> IO a)
               -> IO a
 genSimulation symCfg crucFunc extractResult =
@@ -126,11 +126,17 @@ genSimulation symCfg crucFunc extractResult =
             re <- CS.callCFG cfg (CS.RegMap $ freshRegEntries initArgs)
             return (CS.regValue re)
       let globalReads = AC.funcGlobalReads crucFunc
-      (freshGlobalReads, globalState) <- initGlobals symCfg globalReads
+      let globalReadReprs = FC.fmapFC AT.projectValue (AS.funcGlobalReadReprs sig)
+      let globalReadStructRepr = WT.BaseStructRepr globalReadReprs
+      FreshArg _ gbv _ _ <- allocateFreshArg sym (AC.LabeledValue "globalReads" globalReadStructRepr)
+      let globalStruct = WI.varExpr sym gbv
+      globals <- Ctx.traverseWithIndex (\idx _ -> WI.structField sym globalStruct idx) globalReadReprs
+      let globalState = initGlobals symCfg globals globalReads
       (s0, funsref) <- initialSimulatorState symCfg globalState econt retRepr
       ft <- executionFeatures (AS.funcName $ AC.funcSig crucFunc) (simSym symCfg)
       p <- CBO.getSolverProcess sym
-      let allBVs = getBVs initArgs ++ getBVs freshGlobalReads
+      let argBVs = FC.fmapFC freshArgBoundVar initArgs
+      let allBVs = getBVs initArgs ++ [Some gbv]
       eres <- WPO.inNewFrameWithVars p allBVs $ do
         CS.executeCrucible ft s0
       case eres of
@@ -140,7 +146,7 @@ genSimulation symCfg crucFunc extractResult =
           gp <- case pres of
             CS.TotalRes gp -> return gp
             CS.PartialRes _ _ gp _ -> return gp
-          extractResult (gp ^. CS.gpValue) initArgs freshGlobalReads
+          extractResult (gp ^. CS.gpValue) argBVs gbv
   where
     getBVs ctx = FC.toListFC (\(FreshArg _ bv _ _) -> Some bv) ctx
 
@@ -159,204 +165,195 @@ simulateFunction symCfg crucFunc = genSimulation symCfg crucFunc extractResult
   where
     sig = AC.funcSig crucFunc
     sym = simSym symCfg
-    globalReadReprs = FC.fmapFC AT.projectValue (AS.funcGlobalReadReprs sig)
-    globalReadStructRepr = WT.BaseStructRepr globalReadReprs
-    argReprs = FC.fmapFC AT.projectValue (AS.funcArgReprs sig)
     retType = AS.funcSigBaseRepr sig
 
-    extractResult re initArgs freshGlobals =
+    extractResult re argBVs globalBV =
       case CT.asBaseType (CS.regType re) of
         CT.NotBaseType -> X.throwIO (NonBaseTypeReturn (CS.regType re))
         CT.AsBaseType btr
           | Just Refl <- testEquality btr retType -> do
               --print (WI.printSymExpr (CS.regValue re))
               let name = T.unpack (AS.funcName sig)
-                  globalReadBVs = FC.fmapFC freshArgBoundVar freshGlobals
-                  argBVs = FC.fmapFC freshArgBoundVar initArgs
                   solverSymbolName = case WI.userSymbol name of
                     Left err -> error (show err)
                     Right symbol -> symbol
-              FreshArg gre gbv _ _ <- allocateFreshArg sym (AC.LabeledValue "globalReads" globalReadStructRepr)
-              let globalStruct = WI.varExpr sym gbv
-              globals <- Ctx.traverseWithIndex (\idx _ -> WI.structField sym globalStruct idx) globalReadReprs
-              fnexpr <- S.evalBoundVars sym (CS.regValue re) globalReadBVs globals
               --print (WI.printSymExpr fnexpr)
-              let allArgBvs = (argBVs Ctx.:> gbv)
+              let allArgBvs = (argBVs Ctx.:> globalBV)
               fn <- WI.definedFn
                 sym
                 solverSymbolName
                 allArgBvs
-                fnexpr
+                (CS.regValue re)
                 (const False )
               return $ fn
           | otherwise -> X.throwIO (UnexpectedReturnType btr)
 
 
-simulateInstruction :: forall sym init globalReads globalWrites tps scope
-                     . (CB.IsSymInterface sym, OnlineSolver scope sym)
-                    => SimulatorConfig scope
-                    -> AC.Function A32 globalReads globalWrites init tps
-                    -> IO (Some (SF.ParameterizedFormula sym A32))
-simulateInstruction symCfg crucFunc = genSimulation symCfg crucFunc extractResult
-  where
-    sig = AC.funcSig crucFunc
-    extractResult re initArgs freshGlobals =
-      let sig = AC.funcSig crucFunc
-          labeledInitArgs = AT.addLabels (AS.funcArgReprs sig) initArgs
-          globalWriteTypes = WT.BaseStructRepr $ FC.fmapFC AT.projectValue (AS.funcGlobalWriteReprs sig)
-          naturalRetType = WT.BaseStructRepr $ AS.funcRetRepr sig
-          retType = WT.BaseStructRepr (Ctx.empty Ctx.:> globalWriteTypes Ctx.:> naturalRetType )
-      in case CT.asBaseType (CS.regType re) of
-        CT.NotBaseType -> X.throwIO (NonBaseTypeReturn (CS.regType re))
-        CT.AsBaseType btr
-          | Just Refl <- testEquality btr retType -> do
-              let sym = simSym symCfg
-              -- print (WI.printSymExpr (CS.regValue re))
-              let name = T.unpack (AS.funcName sig)
-                  argTypes = reshape (FC.fmapFC AT.projectValue (AS.funcArgReprs sig))
-                  argVars = freshArgBoundVars' initArgs
-                  solverSymbolName = case WI.userSymbol name of
-                    Left err -> error (show err)
-                    Right symbol -> symbol
-              naturalRetStruct <- WI.structField sym (CS.regValue re) Ctx.i2of2
-              Some opcol <- FC.foldrMFC' (collectOperand sym naturalRetType naturalRetStruct) (Some emptyOperandCollector) labeledInitArgs
+-- simulateInstruction :: forall sym init globalReads globalWrites tps scope
+--                      . (CB.IsSymInterface sym, OnlineSolver scope sym)
+--                     => SimulatorConfig scope
+--                     -> AC.Function A32 globalReads globalWrites init tps
+--                     -> IO (Some (SF.ParameterizedFormula sym A32))
+-- simulateInstruction symCfg crucFunc = genSimulation symCfg crucFunc extractResult
+--   where
+--     sig = AC.funcSig crucFunc
+--     extractResult re initArgs freshGlobals =
+--       let sig = AC.funcSig crucFunc
+--           labeledInitArgs = AT.addLabels (AS.funcArgReprs sig) initArgs
+--           globalWriteTypes = WT.BaseStructRepr $ FC.fmapFC AT.projectValue (AS.funcGlobalWriteReprs sig)
+--           naturalRetType = WT.BaseStructRepr $ AS.funcRetRepr sig
+--           retType = WT.BaseStructRepr (Ctx.empty Ctx.:> globalWriteTypes Ctx.:> naturalRetType )
+--       in case CT.asBaseType (CS.regType re) of
+--         CT.NotBaseType -> X.throwIO (NonBaseTypeReturn (CS.regType re))
+--         CT.AsBaseType btr
+--           | Just Refl <- testEquality btr retType -> do
+--               let sym = simSym symCfg
+--               -- print (WI.printSymExpr (CS.regValue re))
+--               let name = T.unpack (AS.funcName sig)
+--                   argTypes = reshape (FC.fmapFC AT.projectValue (AS.funcArgReprs sig))
+--                   argVars = freshArgBoundVars' initArgs
+--                   solverSymbolName = case WI.userSymbol name of
+--                     Left err -> error (show err)
+--                     Right symbol -> symbol
+--               naturalRetStruct <- WI.structField sym (CS.regValue re) Ctx.i2of2
+--               Some opcol <- FC.foldrMFC' (collectOperand sym naturalRetType naturalRetStruct) (Some emptyOperandCollector) labeledInitArgs
 
-              let globalReads = collectGlobalReads (mkFreshArgMap freshGlobals)
+--               let globalReads = collectGlobalReads (mkFreshArgMap freshGlobals)
 
-              globalRetStruct <- WI.structField sym (CS.regValue re) Ctx.i1of2
-              globalWrites <- Ctx.traverseAndCollect
-                (collectGlobalWrites sym globalWriteTypes globalRetStruct globalReads)
-                  (AS.funcGlobalWriteReprs sig)
+--               globalRetStruct <- WI.structField sym (CS.regValue re) Ctx.i1of2
+--               globalWrites <- Ctx.traverseAndCollect
+--                 (collectGlobalWrites sym globalWriteTypes globalRetStruct globalReads)
+--                   (AS.funcGlobalWriteReprs sig)
 
-              let uses = Set.fromList $ map (\(ParamExpr param _) -> Some param) (opParams opcol)
-                    ++ map (\(LocExpr _ loc _ _) -> Some (SF.LiteralParameter loc)) (Map.elems globalReads)
-              let vars = opBVs opcol
-              let lits = MapF.fromList $ map (\(LocExpr _ loc bv _) -> Pair loc bv) (Map.elems globalReads)
-              let opExprs = MapF.fromList $
-                    mapMaybe (\(ParamExpr param (Just expr)) ->
-                                return (Pair param expr)) (opParams opcol)
-                    ++ mapMaybe (\(LocExpr _ loc _ (Just expr)) ->
-                                   return (Pair (SF.LiteralParameter loc) expr)) (Map.elems globalWrites)
+--               let uses = Set.fromList $ map (\(ParamExpr param _) -> Some param) (opParams opcol)
+--                     ++ map (\(LocExpr _ loc _ _) -> Some (SF.LiteralParameter loc)) (Map.elems globalReads)
+--               let vars = opBVs opcol
+--               let lits = MapF.fromList $ map (\(LocExpr _ loc bv _) -> Pair loc bv) (Map.elems globalReads)
+--               let opExprs = MapF.fromList $
+--                     mapMaybe (\(ParamExpr param (Just expr)) ->
+--                                 return (Pair param expr)) (opParams opcol)
+--                     ++ mapMaybe (\(LocExpr _ loc _ (Just expr)) ->
+--                                    return (Pair (SF.LiteralParameter loc) expr)) (Map.elems globalWrites)
 
-              return $ Some $ SF.ParameterizedFormula {
-                  SF.pfUses = uses
-                , SF.pfOperandVars = vars
-                , SF.pfLiteralVars = lits
-                , SF.pfDefs = opExprs
-                }
+--               return $ Some $ SF.ParameterizedFormula {
+--                   SF.pfUses = uses
+--                 , SF.pfOperandVars = vars
+--                 , SF.pfLiteralVars = lits
+--                 , SF.pfDefs = opExprs
+--                 }
 
-          | otherwise -> X.throwIO (UnexpectedReturnType btr)
+--           | otherwise -> X.throwIO (UnexpectedReturnType btr)
 
-    collectGlobalWrites :: forall tp ctx
-                         . sym
-                        -> WT.BaseTypeRepr (WT.BaseStructType ctx)
-                        -> S.SymExpr sym (WT.BaseStructType ctx) -- globals result struct
-                        -> Map.Map T.Text (LocExpr sym A32)
-                        -> Ctx.Index ctx tp
-                        -> (AC.LabeledValue T.Text WT.BaseTypeRepr) tp
-                        -> IO (Map.Map T.Text (LocExpr sym A32))
-    collectGlobalWrites sym globRepr globExpr readMap ix (AC.LabeledValue gName repr) =
-      case Map.lookup gName readMap of
-        Nothing -> return Map.empty
-        Just (LocExpr locRepr loc bv _) -> do
-          globStructVal <- WI.structField sym globExpr ix
-          let globStructFieldType = WI.exprType globStructVal
-          case testEquality globStructFieldType locRepr of
-            Nothing -> error $ "Mismatch in global read vs. write type" ++ show globStructFieldType
-            Just Refl ->
-              return $ Map.singleton gName $
-                LocExpr locRepr loc bv (Just globStructVal)
+--     collectGlobalWrites :: forall tp ctx
+--                          . sym
+--                         -> WT.BaseTypeRepr (WT.BaseStructType ctx)
+--                         -> S.SymExpr sym (WT.BaseStructType ctx) -- globals result struct
+--                         -> Map.Map T.Text (LocExpr sym A32)
+--                         -> Ctx.Index ctx tp
+--                         -> (AC.LabeledValue T.Text WT.BaseTypeRepr) tp
+--                         -> IO (Map.Map T.Text (LocExpr sym A32))
+--     collectGlobalWrites sym globRepr globExpr readMap ix (AC.LabeledValue gName repr) =
+--       case Map.lookup gName readMap of
+--         Nothing -> return Map.empty
+--         Just (LocExpr locRepr loc bv _) -> do
+--           globStructVal <- WI.structField sym globExpr ix
+--           let globStructFieldType = WI.exprType globStructVal
+--           case testEquality globStructFieldType locRepr of
+--             Nothing -> error $ "Mismatch in global read vs. write type" ++ show globStructFieldType
+--             Just Refl ->
+--               return $ Map.singleton gName $
+--                 LocExpr locRepr loc bv (Just globStructVal)
 
-    collectGlobalReads :: Map.Map T.Text (Some (FreshArg sym))
-                       -> Map.Map T.Text (LocExpr sym A32)
-    collectGlobalReads =
-      Map.mapMaybeWithKey (\k (Some freshArg) -> let
-        freshArgType = freshArgRepr freshArg
-        in case globalToA32Location k of
-          Nothing -> Nothing
-          Just (Pair loc locRepr) -> case testEquality locRepr freshArgType of
-            Nothing -> error $ "Unexpected type for global:" ++ show k ++ " " ++ show locRepr
-            Just Refl -> Just $ LocExpr locRepr loc (freshArgBoundVar freshArg) Nothing)
-
-
-    collectOperand :: forall ctx tp
-                    . sym
-                   -> WT.BaseTypeRepr (WT.BaseStructType ctx)
-                   -> S.SymExpr sym (WT.BaseStructType ctx) -- instruction "return" struct
-                   -> (AC.LabeledValue AS.FunctionArg (FreshArg sym)) tp
-                   -> Some (OperandCollector sym A32)
-                   -> IO (Some (OperandCollector sym A32))
-    collectOperand sym retRepr retExpr (AC.LabeledValue funarg freshArg) (Some opcol) = let
-      AS.FunctionArg nm ty rkind = funarg
-      in case rkind of
-        Just AT.RegisterR ->
-          toOperandCollector <$> collectROperandWrite sym retRepr retExpr freshArg opcol
-        _ -> do
-          Some opcol' <- collectBVOperand freshArg opcol
-          return $ toOperandCollector opcol'
+--     collectGlobalReads :: Map.Map T.Text (Some (FreshArg sym))
+--                        -> Map.Map T.Text (LocExpr sym A32)
+--     collectGlobalReads =
+--       Map.mapMaybeWithKey (\k (Some freshArg) -> let
+--         freshArgType = freshArgRepr freshArg
+--         in case globalToA32Location k of
+--           Nothing -> Nothing
+--           Just (Pair loc locRepr) -> case testEquality locRepr freshArgType of
+--             Nothing -> error $ "Unexpected type for global:" ++ show k ++ " " ++ show locRepr
+--             Just Refl -> Just $ LocExpr locRepr loc (freshArgBoundVar freshArg) Nothing)
 
 
-    -- | We currently assume that non register-indexed operands are all immediates
-    -- (this is a gross simplification), and therefore we only need to collect their bound
-    -- variables.
-    collectBVOperand :: forall sh tp
-                      . FreshArg sym tp
-                     -> OperandCollector sym A32 sh
-                     -> IO (Some (OperandCollector' sym A32 sh))
-    collectBVOperand freshArg opcol = let
-      bt = freshArgRepr freshArg
-      in case bt of
-        CT.BaseBVRepr nr
-          | BVTypeProof Refl srepr <- getRetRepr nr -> do
-            let
-              newParam = SF.OperandParameter bt (symbolIndex srepr)
-              newBV = BV.BoundVar $ freshArgBoundVar freshArg
-              pexpr = ParamExpr newParam Nothing
-            return $ Some $ OperandCollector' $
-              opcol{ opParams = addParamExpr pexpr (opParams opcol)
-                   , opParamRepr = srepr PL.:< (opParamRepr opcol)
-                   , opBVs = newBV PL.:< (opBVs opcol)}
-        _ -> error $ "Expected base type: " ++ show bt
+--     collectOperand :: forall ctx tp
+--                     . sym
+--                    -> WT.BaseTypeRepr (WT.BaseStructType ctx)
+--                    -> S.SymExpr sym (WT.BaseStructType ctx) -- instruction "return" struct
+--                    -> (AC.LabeledValue AS.FunctionArg (FreshArg sym)) tp
+--                    -> Some (OperandCollector sym A32)
+--                    -> IO (Some (OperandCollector sym A32))
+--     collectOperand sym retRepr retExpr (AC.LabeledValue funarg freshArg) (Some opcol) = let
+--       AS.FunctionArg nm ty rkind = funarg
+--       in case rkind of
+--         Just AT.RegisterR ->
+--           toOperandCollector <$> collectROperandWrite sym retRepr retExpr freshArg opcol
+--         _ -> do
+--           Some opcol' <- collectBVOperand freshArg opcol
+--           return $ toOperandCollector opcol'
 
-    -- | We assume that the list of written-to register-indexed operands exactly corresponds to the
-    -- returned struct of the instruction. i.e.
-    -- field imm
-    -- field Rb
-    -- field imm2
-    -- field Rd
-    -- ...
-    -- (R[b], b_idx) = Rb
-    -- b = UInt(b_idx)
-    -- (R[d], d_idx) = Rd
-    -- d = UInt(d_idx)
-    -- ..
-    -- return ((R[b], b_idx), (R[d], d_idx))
-    collectROperandWrite :: forall ctx tp sh
-                          . sym
-                         -> WT.BaseTypeRepr (WT.BaseStructType ctx)
-                         -> S.SymExpr sym (WT.BaseStructType ctx) -- instruction "return" struct
-                         -> FreshArg sym tp
-                         -> OperandCollector sym A32 sh
-                         -> IO (OperandCollector' sym A32 sh "R")
-    collectROperandWrite sym (WT.BaseStructRepr symRepr) structExpr freshArg opcol = do
-      let retVal = (retValueCount opcol)
-      case Ctx.intIndex retVal (Ctx.size symRepr) of
-        Nothing -> error $ "Mismatch in returned registers vs. operand registers"
-        Just (Some ix) -> do
-          regVal <- WI.structField sym structExpr ix
-          let regType = WI.exprType regVal
-          let bt = freshArgRepr freshArg
-          if | Just Refl <- testEquality regType registerRetRepr
-             , Just Refl <- testEquality bt registerRetRepr -> do
-               let
-                 newParam = SF.OperandParameter regType PL.IndexHere
-                 newBV = BV.BoundVar $ freshArgBoundVar freshArg
-                 pexpr = ParamExpr newParam (Just regVal)
-               return $ OperandCollector' $ opcol{ opParams = addParamExpr pexpr (opParams opcol)
-                       , opBVs = newBV PL.:< (opBVs opcol)
-                       , opParamRepr = CT.knownSymbol PL.:< (opParamRepr opcol)
-                       , retValueCount = retVal + 1}
-             | otherwise -> error $ "Expected register type:" ++ show regType ++ " " ++ show bt
+
+--     -- | We currently assume that non register-indexed operands are all immediates
+--     -- (this is a gross simplification), and therefore we only need to collect their bound
+--     -- variables.
+--     collectBVOperand :: forall sh tp
+--                       . FreshArg sym tp
+--                      -> OperandCollector sym A32 sh
+--                      -> IO (Some (OperandCollector' sym A32 sh))
+--     collectBVOperand freshArg opcol = let
+--       bt = freshArgRepr freshArg
+--       in case bt of
+--         CT.BaseBVRepr nr
+--           | BVTypeProof Refl srepr <- getRetRepr nr -> do
+--             let
+--               newParam = SF.OperandParameter bt (symbolIndex srepr)
+--               newBV = BV.BoundVar $ freshArgBoundVar freshArg
+--               pexpr = ParamExpr newParam Nothing
+--             return $ Some $ OperandCollector' $
+--               opcol{ opParams = addParamExpr pexpr (opParams opcol)
+--                    , opParamRepr = srepr PL.:< (opParamRepr opcol)
+--                    , opBVs = newBV PL.:< (opBVs opcol)}
+--         _ -> error $ "Expected base type: " ++ show bt
+
+--     -- | We assume that the list of written-to register-indexed operands exactly corresponds to the
+--     -- returned struct of the instruction. i.e.
+--     -- field imm
+--     -- field Rb
+--     -- field imm2
+--     -- field Rd
+--     -- ...
+--     -- (R[b], b_idx) = Rb
+--     -- b = UInt(b_idx)
+--     -- (R[d], d_idx) = Rd
+--     -- d = UInt(d_idx)
+--     -- ..
+--     -- return ((R[b], b_idx), (R[d], d_idx))
+--     collectROperandWrite :: forall ctx tp sh
+--                           . sym
+--                          -> WT.BaseTypeRepr (WT.BaseStructType ctx)
+--                          -> S.SymExpr sym (WT.BaseStructType ctx) -- instruction "return" struct
+--                          -> FreshArg sym tp
+--                          -> OperandCollector sym A32 sh
+--                          -> IO (OperandCollector' sym A32 sh "R")
+--     collectROperandWrite sym (WT.BaseStructRepr symRepr) structExpr freshArg opcol = do
+--       let retVal = (retValueCount opcol)
+--       case Ctx.intIndex retVal (Ctx.size symRepr) of
+--         Nothing -> error $ "Mismatch in returned registers vs. operand registers"
+--         Just (Some ix) -> do
+--           regVal <- WI.structField sym structExpr ix
+--           let regType = WI.exprType regVal
+--           let bt = freshArgRepr freshArg
+--           if | Just Refl <- testEquality regType registerRetRepr
+--              , Just Refl <- testEquality bt registerRetRepr -> do
+--                let
+--                  newParam = SF.OperandParameter regType PL.IndexHere
+--                  newBV = BV.BoundVar $ freshArgBoundVar freshArg
+--                  pexpr = ParamExpr newParam (Just regVal)
+--                return $ OperandCollector' $ opcol{ opParams = addParamExpr pexpr (opParams opcol)
+--                        , opBVs = newBV PL.:< (opBVs opcol)
+--                        , opParamRepr = CT.knownSymbol PL.:< (opParamRepr opcol)
+--                        , retValueCount = retVal + 1}
+--              | otherwise -> error $ "Expected register type:" ++ show regType ++ " " ++ show bt
 
 -- | Mapping from ASL globals to their ISA location
 globalToA32Location :: T.Text -> Maybe (Pair (L.Location A32) CT.BaseTypeRepr)
@@ -580,20 +577,20 @@ initialSimulatorState symCfg symGlobalState econt retRepr = do
 initGlobals :: forall sym env scope
              . (CB.IsSymInterface sym, OnlineSolver scope sym)
             => SimulatorConfig scope
+            -> Ctx.Assignment (S.Expr scope) env
             -> Ctx.Assignment AC.BaseGlobalVar env
-            -> IO (Ctx.Assignment (FreshArg sym) env, CS.SymGlobalState sym)
-initGlobals symCfg globals = do
-  MS.runStateT (FC.forFC globals addGlobal) (CS.emptyGlobals)
+            -> CS.SymGlobalState sym
+initGlobals symCfg initGlobals globalVars = do
+  Ctx.forIndex (Ctx.size globalVars) addGlobal CS.emptyGlobals
   where
     addGlobal :: forall bt
-               . AC.BaseGlobalVar bt
-              -> MS.StateT (CSG.SymGlobalState sym) IO (FreshArg sym bt)
-    addGlobal (AC.BaseGlobalVar gv) = do
-      gs <- MS.get
-      let baseGlobalType = AT.toBaseType (CCG.globalType gv)
-      arg <- liftIO $ allocateFreshArg (simSym symCfg) (AC.LabeledValue (CCG.globalName gv) baseGlobalType)
-      MS.put $ CSG.insertGlobal gv (CS.regValue (freshArgEntry arg)) gs
-      return arg
+               . CSG.SymGlobalState sym
+              -> Ctx.Index env bt
+              -> CSG.SymGlobalState sym
+    addGlobal gs idx =
+      let
+        AC.BaseGlobalVar gv = globalVars Ctx.! idx
+      in CSG.insertGlobal gv (initGlobals Ctx.! idx) gs
 
 executionFeatures :: sym ~ CBO.OnlineBackend scope solver fs
                   => WPO.OnlineSolver scope solver

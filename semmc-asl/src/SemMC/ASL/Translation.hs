@@ -964,7 +964,8 @@ translateAssignment'' ov lval atom constraint atomext mE = do
               in
                 CCG.App $ CCE.ExtensionApp getStruct
 
-
+intValue :: Integer
+intValue = 1
 
 translateImplicitSlice :: Overrides arch
                        -> WT.NatRepr w
