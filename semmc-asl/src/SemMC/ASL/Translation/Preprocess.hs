@@ -1155,7 +1155,7 @@ computeInstructionSignature AS.Instruction{..} encName iset = do
                                    , funcArgReprs = argReprs
                                    , funcRetRepr = retT
                                    , funcGlobalReadReprs = globalReadReprs
-                                   , funcGlobalWriteReprs = globalReadReprs
+                                   , funcGlobalWriteReprs = globalWriteReprs
                                    , funcStaticVals = staticEnvMapVals staticEnv
                                    }
       return (Some (SomeFunctionSignature pSig), finalInstStmts)
